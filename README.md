@@ -30,11 +30,13 @@ For an exhaustive, file-by-file breakdown explaining the architecture, dependenc
 ## 🚀 Quick Start
 
 ### 1. Install Dependencies
+
 ```bash
 npm install
 ```
 
 ### 2. Run the Development Server
+
 ```bash
 # Start Expo Metro bundler
 npm run start
@@ -50,6 +52,7 @@ npm run web
 ```
 
 ### 3. Type Checking
+
 ```bash
 npx tsc --noEmit
 ```
@@ -64,3 +67,5 @@ npx tsc --noEmit
 - **Icons:** `@hugeicons/react-native` & `@hugeicons/core-free-icons`
 - **Vectors:** `react-native-svg`
 - **Safe Area:** `react-native-safe-area-context`
+
+<!--DB Password: NtX&754vbrrDbcTruY@XHQ -->

@@ -6,21 +6,23 @@
  * - Bottom: Full-width Google Sign-in action button with SVG brand mark & press feedback
  */
 
-import React, { useState } from 'react';
+import { Colors } from "@/constants/colors";
+import { supabase } from "@/lib/supabase";
+import { AiSparklesIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react-native";
+import * as Linking from "expo-linking";
+import { usePathname, useRouter } from "expo-router";
+import * as WebBrowser from "expo-web-browser";
+import { useEffect, useState } from "react";
 import {
-  View,
-  Text,
-  StyleSheet,
-  Pressable,
   ActivityIndicator,
-} from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import Svg, { Path } from 'react-native-svg';
-import { HugeiconsIcon } from '@hugeicons/react-native';
-import { AiSparklesIcon } from '@hugeicons/core-free-icons';
-import { Colors } from '@/constants/colors';
-import { useRouter } from 'expo-router';
-import { showToast } from '@/context/ToastContext';
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import Svg, { Path } from "react-native-svg";
 
 /**
  * 4-Color Official Google Brand SVG Icon
@@ -50,13 +52,75 @@ export default function SignInScreen() {
   const [loading, setLoading] = useState(false);
   const router = useRouter();
 
-  const handleGoogleSignIn = () => {
-    showToast('Signed in successfully');
-    router.replace('/(tabs)/chat' as any);
+  const pathname = usePathname();
+
+  console.log("Current route:", pathname);
+
+  useEffect(() => {
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (session) {
+        router.replace("/(tabs)/chat");
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, [router]);
+
+  const handleGoogleSignIn = async () => {
+    try {
+      await WebBrowser.dismissBrowser();
+    } catch {
+      // No browser session currently open
+    }
+
+    const redirectTo = Linking.createURL("auth/callback");
+    console.log("redirectTo", redirectTo);
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo,
+        skipBrowserRedirect: true,
+      },
+    });
+
+    if (error) throw error;
+    const result = await WebBrowser.openAuthSessionAsync(data.url!, redirectTo);
+
+    if (result.type !== "success") return null;
+
+    const params = new URLSearchParams(result.url.split("#")[1]);
+    const accessToken = params.get("access_token");
+    const refreshToken = params.get("refresh_token");
+
+    if (!accessToken || !refreshToken) return null;
+
+    const { data: sessionData, error: sessionError } =
+      await supabase.auth.setSession({
+        access_token: accessToken,
+        refresh_token: refreshToken,
+      });
+
+    if (sessionError) throw sessionError;
+
+    if (sessionData.session) {
+      const { data: userData, error: userError } = await supabase
+        .from("users")
+        .upsert({
+          email: sessionData.session.user.email,
+          name: sessionData.session.user.user_metadata.name ?? "",
+        })
+        .select();
+      router.replace("/(tabs)/chat" as any);
+    }
   };
 
   return (
-    <SafeAreaView style={styles.container} edges={['top', 'bottom', 'left', 'right']}>
+    <SafeAreaView
+      style={styles.container}
+      edges={["top", "bottom", "left", "right"]}
+    >
       <View style={styles.content}>
         {/* Center Hero: Muse AI Brand Emblem & Wordmark */}
         <View style={styles.logoWrapper}>
@@ -91,7 +155,8 @@ export default function SignInScreen() {
               loading && styles.buttonDisabled,
             ]}
             accessibilityRole="button"
-            accessibilityLabel="Sign in with Google">
+            accessibilityLabel="Sign in with Google"
+          >
             {loading ? (
               <ActivityIndicator size="small" color={Colors.primary} />
             ) : (
@@ -116,22 +181,22 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingHorizontal: 24,
     paddingTop: 80,
     paddingBottom: 48,
-    width: '100%',
+    width: "100%",
     maxWidth: 400,
-    alignSelf: 'center',
+    alignSelf: "center",
   },
   logoWrapper: {
     flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
+    justifyContent: "center",
+    alignItems: "center",
   },
   glowRing: {
-    position: 'absolute',
+    position: "absolute",
     top: -10,
     width: 104,
     height: 104,
@@ -143,8 +208,8 @@ const styles = StyleSheet.create({
     height: 84,
     borderRadius: 42,
     backgroundColor: Colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     shadowColor: Colors.primary,
     shadowOffset: { width: 0, height: 10 },
     shadowOpacity: 0.35,
@@ -153,25 +218,25 @@ const styles = StyleSheet.create({
     marginBottom: 18,
   },
   brandRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
   },
   brandName: {
     fontSize: 34,
-    fontWeight: '800',
+    fontWeight: "800",
     color: Colors.textPrimary,
     letterSpacing: -0.6,
   },
   aiText: {
     fontSize: 34,
-    fontWeight: '800',
+    fontWeight: "800",
     color: Colors.primary,
     letterSpacing: -0.6,
   },
   actionContainer: {
-    width: '100%',
-    alignItems: 'center',
+    width: "100%",
+    alignItems: "center",
   },
   button: {
     height: 54,
@@ -179,10 +244,10 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: Colors.border,
     borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     paddingHorizontal: 24,
-    width: '100%',
+    width: "100%",
     shadowColor: Colors.black,
     shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.05,
@@ -198,16 +263,16 @@ const styles = StyleSheet.create({
     opacity: 0.6,
   },
   buttonContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
   },
   iconWrapper: {
     marginRight: 12,
   },
   buttonText: {
     fontSize: 16,
-    fontWeight: '700',
+    fontWeight: "700",
     color: Colors.textPrimary,
     letterSpacing: -0.2,
   },
