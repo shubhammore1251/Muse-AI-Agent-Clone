@@ -8,30 +8,36 @@
  * 4. Bottom Toolbar: Settings gear shortcut, search filter input, and compose new chat button
  */
 
-import React, { useState } from 'react';
+import { Colors } from "@/constants/colors";
+import { showToast } from "@/context/ToastContext";
+import { supabase } from "@/lib/supabase";
 import {
-  View,
-  Text,
-  StyleSheet,
-  Modal,
-  TouchableOpacity,
-  ScrollView,
-  TextInput,
-  Platform,
-} from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { HugeiconsIcon } from '@hugeicons/react-native';
+  CreateNewThread,
+  deleteSingleThread,
+  getAllUserThreads,
+} from "@/services/chatHistory";
+import { SideChatItem } from "@/types";
 import {
   ArrowRight01Icon,
   Delete02Icon,
-  Settings01Icon,
-  Search01Icon,
   Edit02Icon,
-} from '@hugeicons/core-free-icons';
-import { Colors } from '@/constants/colors';
-import { SIDE_CHATS } from '@/constants/dummyData';
-import { SideChatItem } from '@/types';
-import { showToast } from '@/context/ToastContext';
+  Search01Icon,
+  Settings01Icon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react-native";
+import { useRouter } from "expo-router";
+import React, { useEffect, useState } from "react";
+import {
+  Modal,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 
 export interface SidebarDrawerProps {
   /** Visibility state of the drawer modal */
@@ -58,31 +64,92 @@ export interface SidebarDrawerProps {
 export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
   visible,
   activeChatId,
-  agentName = 'Cooper',
+  agentName = "Cooper",
   onClose,
   onSelectChat,
   onNewChat,
   onOpenSettings,
   onClearSideChats,
 }) => {
-  const [searchQuery, setSearchQuery] = useState('');
-  const [sideChats] = useState<SideChatItem[]>(SIDE_CHATS);
+  const router = useRouter();
+  const [searchQuery, setSearchQuery] = useState("");
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [sideChatList, setSideChatList] = useState<SideChatItem[]>([]);
+  const [mainChat, setMainChat] = useState<SideChatItem | null>(null);
 
-  // Filter side chat topics by active search query
-  const filteredChats = sideChats.filter((chat) =>
-    chat.title.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  useEffect(() => {
+    const getUserSession = async () => {
+      const { data, error } = await supabase.auth.getSession();
 
+      if (error) {
+        console.error("Failed to get session:", error.message);
+        return;
+      }
+
+      setUserEmail(data.session?.user?.email ?? null);
+    };
+
+    getUserSession();
+  }, [visible]);
+
+  useEffect(() => {
+    userEmail && getAllUserChatThreads();
+  }, [userEmail, visible]);
+
+  const createNewSideChat = async () => {
+    const sideThread = await CreateNewThread(
+      userEmail ?? "",
+      "side",
+      "New side chat",
+    );
+
+    router.replace({
+      pathname: "/(tabs)/chat",
+      params: {
+        sideChatThreadId: sideThread.id,
+        chatType: "side",
+      },
+    });
+    onClose();
+    // onNewChat();
+  };
+
+  const getAllUserChatThreads = async () => {
+    const data = await getAllUserThreads(userEmail ?? "");
+
+    const mainChat = data?.find((thread) => thread.type === "main");
+
+    const sideChats = data
+      ?.filter((thread) => thread.type === "side")
+      .map((thread) => ({
+        id: thread.id,
+        title: thread.title,
+        hasUnreadDot: thread.has_unread_updates ?? false,
+      })) as SideChatItem[];
+
+    setSideChatList(sideChats);
+    setMainChat(mainChat);
+    // console.log("All user chat threads:", data);
+  };
+
+  const deleteThread = async (threadId: string) => {
+    const data = await deleteSingleThread(threadId);
+    setSideChatList((prev) => prev.filter((thread) => thread.id !== threadId));
+  };
 
   return (
     <Modal
       visible={visible}
       transparent
       animationType="fade"
-      onRequestClose={onClose}>
+      onRequestClose={onClose}
+    >
       <View style={styles.modalContainer}>
         {/* Fullscreen white sidebar with safe area */}
-        <SafeAreaView style={styles.safeContainer} edges={['top', 'bottom', 'left', 'right']}>
+        <SafeAreaView
+          style={styles.safeContainer}
+          edges={["top", "bottom", "left", "right"]}
+        >
           {/* Top Bar: Center Name + Right Arrow Button */}
           <View style={styles.header}>
             <View style={styles.headerSideSpacer} />
@@ -93,7 +160,8 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
               style={styles.circleBtn}
               onPress={onClose}
               activeOpacity={0.7}
-              accessibilityLabel="Close sidebar">
+              accessibilityLabel="Close sidebar"
+            >
               <HugeiconsIcon
                 icon={ArrowRight01Icon}
                 size={22}
@@ -108,11 +176,19 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
             <TouchableOpacity
               style={styles.mainChatCapsule}
               onPress={() => {
-                showToast('Main chat');
-                onSelectChat('Main chat');
+                router.replace({
+                  pathname: "/(tabs)/chat",
+                  params: {
+                    sideChatThreadId: mainChat?.id,
+                    chatType: "main",
+                  },
+                });
+                showToast("Main chat");
+                // onSelectChat("Main chat");
                 onClose();
               }}
-              activeOpacity={0.8}>
+              activeOpacity={0.8}
+            >
               <Text style={styles.mainChatText}>Main chat</Text>
             </TouchableOpacity>
           </View>
@@ -124,47 +200,67 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
           <ScrollView
             style={styles.scrollArea}
             contentContainerStyle={styles.scrollContent}
-            showsVerticalScrollIndicator={false}>
+            showsVerticalScrollIndicator={false}
+          >
             {/* Section Header */}
             <View style={styles.sectionHeaderRow}>
               <Text style={styles.sectionHeaderText}>Side chats</Text>
-
-              <TouchableOpacity
-                style={styles.trashBtn}
-                onPress={() => {
-                  showToast('Side chats cleared');
-                  onClearSideChats?.();
-                }}
-                activeOpacity={0.7}
-                accessibilityLabel="Clear side chats">
-                <HugeiconsIcon
-                  icon={Delete02Icon}
-                  size={20}
-                  color={Colors.iconMuted}
-                  strokeWidth={1.8}
-                />
-              </TouchableOpacity>
             </View>
 
             {/* Side Chats List */}
-            {filteredChats.map((chat) => (
-              <TouchableOpacity
-                key={chat.id}
-                style={styles.chatRow}
-                onPress={() => {
-                  showToast(chat.title);
-                  onSelectChat(chat.title);
-                  onClose();
-                }}
-                activeOpacity={0.7}>
-                <Text style={styles.chatRowText} numberOfLines={1}>
-                  {chat.title}
-                </Text>
+            {sideChatList &&
+              sideChatList?.map((chat) => (
+                <TouchableOpacity
+                  key={chat.id}
+                  style={styles.chatRow}
+                  onPress={() => {
+                    router.replace({
+                      pathname: "/(tabs)/chat",
+                      params: {
+                        sideChatThreadId: chat.id,
+                        chatType: "side",
+                      },
+                    });
+                    showToast(chat.title);
+                    // onSelectChat(chat.title);
+                    onClose();
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.chatRowText} numberOfLines={1}>
+                    {chat.title}
+                  </Text>
 
-                {/* Blue Indicator Dot if unread */}
-                {chat.hasUnreadDot && <View style={styles.blueDot} />}
-              </TouchableOpacity>
-            ))}
+                  {/* Blue Indicator Dot if unread */}
+                  <View
+                    style={{
+                      display: "flex",
+                      flexDirection: "row",
+                      gap: 4,
+                      alignItems: "center",
+                    }}
+                  >
+                    {chat.hasUnreadDot && <View style={styles.blueDot} />}
+
+                    <TouchableOpacity
+                      style={styles.trashBtn}
+                      onPress={() => {
+                        deleteThread(chat.id);
+                        onClearSideChats?.();
+                      }}
+                      activeOpacity={0.7}
+                      accessibilityLabel="Clear side chats"
+                    >
+                      <HugeiconsIcon
+                        icon={Delete02Icon}
+                        size={18}
+                        color={Colors.iconMuted}
+                        strokeWidth={1.8}
+                      />
+                    </TouchableOpacity>
+                  </View>
+                </TouchableOpacity>
+              ))}
           </ScrollView>
 
           {/* Bottom Toolbar: Settings Gear (Left) + Search (Center) + Compose (Right) */}
@@ -173,12 +269,13 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
             <TouchableOpacity
               style={styles.circleBtn}
               onPress={() => {
-                showToast('Settings');
+                showToast("Settings");
                 onClose();
                 onOpenSettings?.();
               }}
               activeOpacity={0.7}
-              accessibilityLabel="Settings">
+              accessibilityLabel="Settings"
+            >
               <HugeiconsIcon
                 icon={Settings01Icon}
                 size={22}
@@ -208,12 +305,11 @@ export const SidebarDrawer: React.FC<SidebarDrawerProps> = ({
             <TouchableOpacity
               style={styles.circleBtn}
               onPress={() => {
-                showToast('New chat');
-                onClose();
-                onNewChat();
+                createNewSideChat();
               }}
               activeOpacity={0.7}
-              accessibilityLabel="New chat">
+              accessibilityLabel="New chat"
+            >
               <HugeiconsIcon
                 icon={Edit02Icon}
                 size={20}
@@ -238,9 +334,9 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.white,
   },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingHorizontal: 20,
     paddingTop: 8,
     paddingBottom: 12,
@@ -250,7 +346,7 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     fontSize: 17,
-    fontWeight: '700',
+    fontWeight: "700",
     color: Colors.iconDark,
     letterSpacing: -0.2,
   },
@@ -259,10 +355,10 @@ const styles = StyleSheet.create({
     height: 48,
     borderRadius: 24,
     backgroundColor: Colors.white,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     borderWidth: 1,
-    borderColor: '#F0F0F2',
+    borderColor: "#F0F0F2",
     ...Platform.select({
       ios: {
         shadowColor: Colors.black,
@@ -274,7 +370,7 @@ const styles = StyleSheet.create({
         elevation: 2,
       },
       web: {
-        boxShadow: '0 2px 8px rgba(0, 0, 0, 0.06)',
+        boxShadow: "0 2px 8px rgba(0, 0, 0, 0.06)",
       },
     }),
   },
@@ -284,22 +380,22 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   mainChatCapsule: {
-    width: '100%',
+    width: "100%",
     height: 54,
     backgroundColor: Colors.tabActiveBg, // #E6E8EA
     borderRadius: 27,
-    justifyContent: 'center',
+    justifyContent: "center",
     paddingHorizontal: 20,
   },
   mainChatText: {
     fontSize: 16,
-    fontWeight: '700',
+    fontWeight: "700",
     color: Colors.iconDark,
   },
   divider: {
     height: 1,
-    backgroundColor: '#F0F0F2',
-    width: '100%',
+    backgroundColor: "#F0F0F2",
+    width: "100%",
   },
   scrollArea: {
     flex: 1,
@@ -308,34 +404,34 @@ const styles = StyleSheet.create({
     paddingBottom: 16,
   },
   sectionHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingHorizontal: 20,
     paddingTop: 20,
     paddingBottom: 10,
   },
   sectionHeaderText: {
     fontSize: 15,
-    fontWeight: '600',
+    fontWeight: "600",
     color: Colors.iconMuted, // #8E8E93 / #9E9E9E
   },
   trashBtn: {
     width: 32,
     height: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
   },
   chatRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingHorizontal: 20,
     paddingVertical: 14,
   },
   chatRowText: {
     fontSize: 16,
-    fontWeight: '400',
+    fontWeight: "400",
     color: Colors.iconDark,
     flex: 1,
     paddingRight: 10,
@@ -344,26 +440,26 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: '#0066FF',
+    backgroundColor: "#0066FF",
   },
   bottomToolbar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingHorizontal: 20,
     paddingTop: 8,
-    paddingBottom: Platform.OS === 'ios' ? 12 : 16,
+    paddingBottom: Platform.OS === "ios" ? 12 : 16,
     backgroundColor: Colors.white,
   },
   searchCapsule: {
     flex: 1,
     height: 48,
     borderRadius: 24,
-    backgroundColor: '#F5F6F8',
+    backgroundColor: "#F5F6F8",
     borderWidth: 1,
-    borderColor: '#ECECEC',
-    flexDirection: 'row',
-    alignItems: 'center',
+    borderColor: "#ECECEC",
+    flexDirection: "row",
+    alignItems: "center",
     paddingHorizontal: 14,
     marginHorizontal: 10,
     gap: 8,

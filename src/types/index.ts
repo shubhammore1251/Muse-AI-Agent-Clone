@@ -12,12 +12,41 @@ export interface ChatMessage {
   /** Unique identifier for the message */
   id: string;
   /** Origin of the message: 'user' for current user, 'agent' for Cooper AI, or 'system' */
-  sender: 'user' | 'agent' | 'system';
+  sender: "user" | "agent" | "system";
   /** Plaintext or markdown formatted message content */
   text: string;
   /** Formatted timestamp display string (e.g. "3:35 PM") */
   timestamp: string;
+
+  browserPreview?: BrowserSessionToolOutput;
+  connectCta?: {
+    toolName: string;
+    connectUrl: string;
+  };
+  scheduleConfirmation?: ScheduleConfirmation;
+  scheduleStatus?: "pending" | "saving" | "confirmed" | "cancelled" | "failed";
+  scheduledTaskId?: string;
+  scheduleError?: string;
 }
+
+export type ScheduledTaskType = "generic_prompt";
+
+export type ScheduleRule = {
+  frequency: "daily" | "weekly";
+  time: string;
+  weekday?: string;
+};
+
+export type ScheduleConfirmation = {
+  title: string;
+  originalPrompt: string;
+  taskType: ScheduledTaskType;
+  taskPayload: Record<string, unknown>;
+  scheduleRule: ScheduleRule;
+  timezone: string;
+  delivery: string;
+  summary: string;
+};
 
 /**
  * Chat topic item listed under "Side chats" in the sliding sidebar drawer.
@@ -48,9 +77,29 @@ export interface IdeaItem {
 }
 
 /**
+ * AI news story surfaced in the Feed tab.
+ */
+export interface AiNewsItem {
+  /** Unique news story identifier */
+  id: string;
+  /** Source or publication name */
+  source: string;
+  /** AI topic category shown as a compact chip */
+  category: "Research" | "Product" | "Policy" | "Funding" | "Tools";
+  /** Story headline */
+  title: string;
+  /** Short summary preview */
+  summary: string;
+  /** Relative freshness label */
+  timeAgo: string;
+  /** Estimated read duration */
+  readTime: string;
+}
+
+/**
  * Status of scheduled goals or routines.
  */
-export type TaskStatus = 'active' | 'paused' | 'done';
+export type TaskStatus = "active" | "paused" | "done";
 
 /**
  * Scheduled goal or recurring autonomous workflow tracked in Tasks tab.
@@ -113,7 +162,7 @@ export interface AgentProfile {
 /**
  * Valid navigation tab identifiers
  */
-export type TabKey = 'chat' | 'feed' | 'ideas' | 'tasks' | 'settings';
+export type TabKey = "chat" | "feed" | "ideas" | "tasks" | "settings";
 
 /**
  * Tab dock destination item specification
@@ -125,3 +174,13 @@ export interface TabItem {
   icon: any;
 }
 
+export * from "./tools";
+
+export type BrowserSessionToolOutput = {
+  type: "browser_session";
+  status: "ready";
+  sessionId: string;
+  reason: string;
+  currentUrl: string;
+  previewUrl?: string;
+};

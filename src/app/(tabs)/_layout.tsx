@@ -13,34 +13,34 @@
  * 4. Modals: SidebarDrawer, SettingsMenuModal, EditAgentModal
  */
 
-import React, { useState } from 'react';
-import { View, StyleSheet, Platform } from 'react-native';
-import { Tabs, useRouter } from 'expo-router';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { HugeiconsIcon } from '@hugeicons/react-native';
 import {
+  AppHeader,
+  EditAgentModal,
+  SettingsMenuModal,
+  SidebarDrawer,
+} from "@/components/common";
+import { Colors } from "@/constants/colors";
+import { showToast } from "@/context/ToastContext";
+import {
+  CheckmarkSquare02Icon,
   Comment01Icon,
   File01Icon,
   Idea01Icon,
-  CheckmarkSquare02Icon,
   Settings02Icon,
-} from '@hugeicons/core-free-icons';
-import { Colors } from '@/constants/colors';
-import {
-  AppHeader,
-  SidebarDrawer,
-  SettingsMenuModal,
-  EditAgentModal,
-} from '@/components/common';
-import { showToast } from '@/context/ToastContext';
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react-native";
+import { Tabs, useRouter } from "expo-router";
+import { useState } from "react";
+import { Platform, StyleSheet, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function TabLayout() {
   const router = useRouter();
 
   // Agent mascot & profile state
-  const [agentName, setAgentName] = useState('Cooper');
-  const [agentSubtitle, setAgentSubtitle] = useState('Autonomous Agent');
-  const [mascotIcon, setMascotIcon] = useState('cooper');
+  const [agentName, setAgentName] = useState("Cooper");
+  const [agentSubtitle, setAgentSubtitle] = useState("Autonomous Agent");
+  const [mascotIcon, setMascotIcon] = useState("cooper");
   const [mascotColor, setMascotColor] = useState<string>(Colors.primary);
 
   // Modals state
@@ -49,7 +49,7 @@ export default function TabLayout() {
   const [isEditAgentOpen, setIsEditAgentOpen] = useState(false);
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
+    <SafeAreaView style={styles.safeArea} edges={["top", "left", "right"]}>
       {/* 1. Persistent App Header */}
       <AppHeader
         agentName={agentName}
@@ -69,7 +69,8 @@ export default function TabLayout() {
             tabBarHideOnKeyboard: true,
             tabBarStyle: styles.tabBar,
             tabBarItemStyle: styles.tabBarItem,
-          }}>
+          }}
+        >
           <Tabs.Screen
             name="index"
             options={{
@@ -79,9 +80,11 @@ export default function TabLayout() {
           <Tabs.Screen
             name="chat"
             options={{
-              title: 'Chat',
+              title: "Chat",
               tabBarIcon: ({ focused }) => (
-                <View style={[styles.iconPill, focused && styles.activeIconPill]}>
+                <View
+                  style={[styles.iconPill, focused && styles.activeIconPill]}
+                >
                   <HugeiconsIcon
                     icon={Comment01Icon}
                     size={23}
@@ -95,9 +98,11 @@ export default function TabLayout() {
           <Tabs.Screen
             name="feed"
             options={{
-              title: 'Feed',
+              title: "Feed",
               tabBarIcon: ({ focused }) => (
-                <View style={[styles.iconPill, focused && styles.activeIconPill]}>
+                <View
+                  style={[styles.iconPill, focused && styles.activeIconPill]}
+                >
                   <HugeiconsIcon
                     icon={File01Icon}
                     size={23}
@@ -111,9 +116,11 @@ export default function TabLayout() {
           <Tabs.Screen
             name="ideas"
             options={{
-              title: 'Ideas',
+              title: "Ideas",
               tabBarIcon: ({ focused }) => (
-                <View style={[styles.iconPill, focused && styles.activeIconPill]}>
+                <View
+                  style={[styles.iconPill, focused && styles.activeIconPill]}
+                >
                   <HugeiconsIcon
                     icon={Idea01Icon}
                     size={23}
@@ -127,9 +134,11 @@ export default function TabLayout() {
           <Tabs.Screen
             name="tasks"
             options={{
-              title: 'Task / Goal',
+              title: "Task / Goal",
               tabBarIcon: ({ focused }) => (
-                <View style={[styles.iconPill, focused && styles.activeIconPill]}>
+                <View
+                  style={[styles.iconPill, focused && styles.activeIconPill]}
+                >
                   <HugeiconsIcon
                     icon={CheckmarkSquare02Icon}
                     size={23}
@@ -143,9 +152,11 @@ export default function TabLayout() {
           <Tabs.Screen
             name="settings"
             options={{
-              title: 'Settings',
+              title: "Settings",
               tabBarIcon: ({ focused }) => (
-                <View style={[styles.iconPill, focused && styles.activeIconPill]}>
+                <View
+                  style={[styles.iconPill, focused && styles.activeIconPill]}
+                >
                   <HugeiconsIcon
                     icon={Settings02Icon}
                     size={23}
@@ -154,6 +165,12 @@ export default function TabLayout() {
                   />
                 </View>
               ),
+            }}
+          />
+          <Tabs.Screen
+            name="tools"
+            options={{
+              href: null,
             }}
           />
         </Tabs>
@@ -167,18 +184,18 @@ export default function TabLayout() {
         onClose={() => setIsSidebarOpen(false)}
         onSelectChat={(chatTitle) => {
           setIsSidebarOpen(false);
-          router.replace('/(tabs)/chat' as any);
+          router.replace("/(tabs)/chat" as any);
         }}
         onNewChat={() => {
           setIsSidebarOpen(false);
-          router.replace('/(tabs)/chat' as any);
+          router.replace("/(tabs)/chat" as any);
         }}
         onOpenSettings={() => {
           setIsSidebarOpen(false);
-          router.replace('/(tabs)/settings' as any);
+          router.replace("/(tabs)/settings" as any);
         }}
         onClearSideChats={() => {
-          showToast('Side chats cleared');
+          showToast("Side chats cleared");
         }}
       />
 
@@ -189,13 +206,13 @@ export default function TabLayout() {
         onEditAvatar={() => setIsEditAgentOpen(true)}
         onRename={() => setIsEditAgentOpen(true)}
         onClearChat={() => {
-          showToast('Conversation cleared');
+          showToast("Conversation cleared");
         }}
         onDeleteChat={() => {
-          showToast('Chat deleted');
+          showToast("Chat deleted");
         }}
         onShareChat={() => {
-          showToast('Chat export created');
+          showToast("Chat export created");
         }}
       />
 
@@ -230,25 +247,25 @@ const styles = StyleSheet.create({
   tabBar: {
     backgroundColor: Colors.white,
     borderTopWidth: 1,
-    borderTopColor: '#F0F0F2',
-    height: Platform.OS === 'ios' ? 84 : 70,
-    paddingBottom: Platform.OS === 'ios' ? 22 : 10,
+    borderTopColor: "#F0F0F2",
+    height: Platform.OS === "ios" ? 84 : 70,
+    paddingBottom: Platform.OS === "ios" ? 22 : 10,
     paddingTop: 8,
     paddingHorizontal: 12,
     elevation: 0,
     shadowOpacity: 0,
   },
   tabBarItem: {
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     height: 48,
   },
   iconPill: {
     width: 58,
     height: 42,
     borderRadius: 21,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
   },
   activeIconPill: {
     backgroundColor: Colors.tabActiveBg, // Soft #E6E8EA capsule

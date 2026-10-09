@@ -1,0 +1,194 @@
+import { getApiUrl } from "@/lib/services";
+import { supabase } from "@/lib/supabase";
+import axios from "axios";
+
+export type ChatThreadType = "main" | "side";
+export type ChatMessageType = "user" | "assistant";
+
+export const CreateNewThread = async (
+  userEmail: string,
+  type: ChatThreadType,
+  title: string,
+) => {
+  const { data, error } = await supabase
+    .from("chat_threads")
+    .insert([
+      {
+        user_email: userEmail,
+        type: type,
+        title: title,
+      },
+    ])
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+};
+
+export const getThread = async (threadId: string, userEmail?: string) => {
+  if (!threadId) {
+    const { data, error } = await supabase
+      .from("chat_threads")
+      .select("*")
+      .eq("type", "main")
+      .eq("user_email", userEmail)
+      .maybeSingle();
+
+    if (error) {
+      throw error;
+    }
+
+    return data;
+  }
+
+  const { data, error } = await supabase
+    .from("chat_threads")
+    .select("*")
+    .eq("id", threadId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+};
+
+export const getLatestThread = async (userEmail: string) => {
+  const { data, error } = await supabase
+    .from("chat_threads")
+    .select("*")
+    .eq("user_email", userEmail)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+};
+
+export const loadMessages = async (threadId: string) => {
+  const { data, error } = await supabase
+    .from("chat_messages")
+    .select("*")
+    .eq("thread_id", threadId)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+};
+
+export const getAllUserThreads = async (userEmail: string) => {
+  const { data, error } = await supabase
+    .from("chat_threads")
+    .select("*")
+    .eq("user_email", userEmail)
+    .order("created_at", { ascending: false });
+  // .limit(20)
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+};
+
+export const deleteSingleThread = async (threadId: string) => {
+  const { data: messages, error: messageError } = await supabase
+    .from("chat_messages")
+    .delete()
+    .eq("thread_id", threadId);
+
+  if (messageError) {
+    throw messageError;
+  }
+
+  const { data, error } = await supabase
+    .from("chat_threads")
+    .delete()
+    .eq("id", threadId);
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+};
+
+export const saveMessage = async (
+  threadId: string,
+  userEmail: string,
+  role: ChatMessageType,
+  content: string,
+  metadata: any,
+) => {
+  const { data, error } = await supabase
+    .from("chat_messages")
+    .insert([
+      {
+        thread_id: threadId,
+        user_email: userEmail,
+        role,
+        content,
+        metadata,
+      },
+    ])
+    .select()
+    .single();
+
+  if (error) throw error;
+
+  await supabase
+    .from("chat_threads")
+    .update({ updated_at: new Date().toISOString() })
+    .eq("id", threadId);
+
+  if (role === "assistant" && content.trim()) {
+    try {
+      const { data: thread, error: threadError } = await supabase
+        .from("chat_threads")
+        .select("*")
+        .eq("id", threadId)
+        .single();
+
+      if (threadError) throw threadError;
+
+      if (thread?.type === "side" && thread?.title === "New side chat") {
+        const response = await axios.post(
+          getApiUrl("/chat-title"),
+          { assistantResponse: content },
+          { timeout: 60000 },
+        );
+
+        const generatedTitle = response.data?.title?.trim();
+        console.log("Generated title:", generatedTitle);
+
+        if (generatedTitle && generatedTitle !== "SKIP_TITLE") {
+          console.log("Updating title:", generatedTitle);
+          const { error: titleError } = await supabase
+            .from("chat_threads")
+            .update({ title: generatedTitle })
+            .eq("id", threadId);
+
+          if (titleError) {
+            console.error("Failed to update title:", titleError);
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Chat title generation failed:", error);
+    }
+  }
+
+  return data;
+};

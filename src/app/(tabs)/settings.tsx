@@ -43,6 +43,7 @@ export default function SettingsScreen() {
 
     showToast("Signed out successfully");
   };
+
   return (
     <View style={styles.container}>
       <ScrollView
@@ -83,11 +84,11 @@ export default function SettingsScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* 2. Primary Group: Connectors & Pricing */}
+        {/* 2. Primary Group: Tools & Connections & Pricing */}
         <View style={styles.groupCard}>
           <TouchableOpacity
             style={styles.listItem}
-            onPress={() => showToast("Connectors")}
+            onPress={() => router.push("/tools" as any)}
             activeOpacity={0.65}
           >
             <View style={styles.listIconCol}>
@@ -98,7 +99,7 @@ export default function SettingsScreen() {
                 strokeWidth={2}
               />
             </View>
-            <Text style={styles.listLabel}>Connectors</Text>
+            <Text style={styles.listLabel}>Tools & Connections</Text>
             <HugeiconsIcon
               icon={ArrowRight01Icon}
               size={20}
