@@ -12,6 +12,7 @@ import {
   checkToolConnectionStatusApi,
   disconnectToolApi,
   fetchToolsWithUserConnection,
+  refreshToolConnectionStatusesApi,
   startToolConnectionApi,
 } from "@/services/tools";
 import { ToolWithConnection } from "@/types/tools";
@@ -73,6 +74,42 @@ export default function ToolsConnectionsScreen() {
     try {
       const data = await fetchToolsWithUserConnection();
       setTools(data);
+
+      try {
+        const { results } = await refreshToolConnectionStatusesApi();
+        const refreshedTools = await fetchToolsWithUserConnection();
+        const verificationByToolId = new Map(
+          results.map((result) => [result.toolId, result]),
+        );
+        setTools(
+          refreshedTools.map((tool) => {
+            const verification = verificationByToolId.get(tool.id);
+            return {
+              ...tool,
+              statusVerification:
+                verification?.verificationStatus || "verified",
+              statusVerificationError: verification?.verificationError || null,
+            };
+          }),
+        );
+      } catch (err) {
+        console.warn("[tools.tsx] Failed to refresh connection statuses:", err);
+        setTools(
+          data.map((tool) => ({
+            ...tool,
+            ...(tool.status !== "not_connected"
+              ? {
+                  statusVerification: "unavailable" as const,
+                  statusVerificationError:
+                    "Could not verify this connection right now. The last known status is shown.",
+                }
+              : {}),
+          })),
+        );
+        if (data.some((tool) => tool.status !== "not_connected")) {
+          showToast("Connection status is temporarily unavailable");
+        }
+      }
     } catch (err: any) {
       console.error("[tools.tsx] Error loading tools:", err);
       showToast("Failed to load tools");
@@ -135,6 +172,11 @@ export default function ToolsConnectionsScreen() {
               return {
                 ...item,
                 status: newStatus,
+                composio_connected_account_id:
+                  statusRes.composioConnectedAccountId ||
+                  item.composio_connected_account_id,
+                statusVerification: statusRes.verificationStatus,
+                statusVerificationError: statusRes.verificationError || null,
                 connected_email:
                   statusRes.connectedEmail || item.connected_email,
                 connected_label:
@@ -163,6 +205,18 @@ export default function ToolsConnectionsScreen() {
         console.warn(
           `[tools.tsx] Status check error for ${toolId}:`,
           err?.message || err,
+        );
+        setTools((prevTools) =>
+          prevTools.map((item) =>
+            item.id === toolId
+              ? {
+                  ...item,
+                  statusVerification: "unavailable",
+                  statusVerificationError:
+                    "Could not verify this connection right now. The last known status is shown.",
+                }
+              : item,
+          ),
         );
       } finally {
         checkingStatusRef.current[toolId] = false;
@@ -197,6 +251,10 @@ export default function ToolsConnectionsScreen() {
       const res = await startToolConnectionApi(targetTool.id, callbackUrl);
 
       if (!res.success || !res.connectUrl) {
+        if (res.success && res.status === "connected") {
+          await checkSingleToolStatus(targetTool.id);
+          return;
+        }
         throw new Error("No authorization URL returned from server.");
       }
 

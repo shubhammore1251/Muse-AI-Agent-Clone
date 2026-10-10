@@ -1,6 +1,6 @@
 import {
-    startToolConnection,
-    validateUserFromRequest,
+  startToolConnection,
+  validateUserFromRequest,
 } from "@/lib/composioBackend";
 
 /**

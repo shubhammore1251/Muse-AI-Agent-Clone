@@ -79,6 +79,8 @@ export interface ToolWithConnection {
   connected_email: string | null;
   composio_auth_config_id?: string | null;
   composio_connected_account_id?: string | null;
+  statusVerification?: "verified" | "unavailable";
+  statusVerificationError?: string | null;
 }
 
 /**
@@ -133,6 +135,13 @@ export interface CheckStatusResponse {
   composioConnectedAccountId: string | null;
   composioConnectionRequestId: string | null;
   lastCheckedAt: string;
+  verificationStatus: "verified" | "unavailable";
+  verificationError?: string;
+}
+
+export interface SyncToolStatusesResponse {
+  success: boolean;
+  results: CheckStatusResponse[];
 }
 
 export interface DisconnectResponse {

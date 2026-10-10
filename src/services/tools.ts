@@ -1,12 +1,13 @@
 import { supabase } from "@/lib/supabase";
 import {
-  CheckStatusResponse,
-  DisconnectResponse,
-  StartConnectionResponse,
-  Tool,
-  ToolAction,
-  ToolWithConnection,
-  UserToolConnection,
+    CheckStatusResponse,
+    DisconnectResponse,
+    StartConnectionResponse,
+    SyncToolStatusesResponse,
+    Tool,
+    ToolAction,
+    ToolWithConnection,
+    UserToolConnection,
 } from "@/types/tools";
 import Constants from "expo-constants";
 import { Platform } from "react-native";
@@ -307,6 +308,14 @@ export const checkToolConnectionStatusApi = async (
     },
   );
 };
+
+/** Refreshes every stored connection for the authenticated user on the backend. */
+export const refreshToolConnectionStatusesApi =
+  async (): Promise<SyncToolStatusesResponse> => {
+    return callToolApi<SyncToolStatusesResponse>("/api/tools/status", {
+      method: "POST",
+    });
+  };
 
 /**
  * 3. Disconnect Tool Connection

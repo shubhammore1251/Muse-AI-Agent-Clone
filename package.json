@@ -43,6 +43,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
+    "supabase": "^2.120.0",
     "typescript": "~6.0.3"
   },
   "scripts": {

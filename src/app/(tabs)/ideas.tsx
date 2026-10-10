@@ -5,17 +5,16 @@
  * On-click triggers simple Toast notifications.
  */
 
-import React from 'react';
+import { Colors } from "@/constants/colors";
+import { IDEA_ITEMS } from "@/constants/dummyData";
+import { showToast } from "@/context/ToastContext";
 import {
-  View,
-  Text,
-  StyleSheet,
   ScrollView,
+  StyleSheet,
+  Text,
   TouchableOpacity,
-} from 'react-native';
-import { Colors } from '@/constants/colors';
-import { IDEA_ITEMS } from '@/constants/dummyData';
-import { showToast } from '@/context/ToastContext';
+  View,
+} from "react-native";
 
 export default function IdeasScreen() {
   return (
@@ -23,7 +22,8 @@ export default function IdeasScreen() {
       <ScrollView
         style={styles.scrollArea}
         contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}>
+        showsVerticalScrollIndicator={false}
+      >
         {/* Page Title */}
         <View style={styles.titleWrapper}>
           <Text style={styles.pageTitle}>Ideas</Text>
@@ -35,7 +35,8 @@ export default function IdeasScreen() {
             <TouchableOpacity
               style={styles.ideaRow}
               onPress={() => showToast(`Selected: ${item.title}`)}
-              activeOpacity={0.75}>
+              activeOpacity={0.75}
+            >
               {/* 3D Emoji Icon Badge */}
               <View style={styles.iconContainer}>
                 <Text style={styles.iconEmoji}>{item.icon}</Text>
@@ -76,13 +77,13 @@ const styles = StyleSheet.create({
   },
   pageTitle: {
     fontSize: 28,
-    fontWeight: '700',
+    fontWeight: "700",
     color: Colors.iconDark,
     letterSpacing: -0.5,
   },
   ideaRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
+    flexDirection: "row",
+    alignItems: "flex-start",
     paddingHorizontal: 20,
     paddingVertical: 18,
     gap: 16,
@@ -90,8 +91,8 @@ const styles = StyleSheet.create({
   iconContainer: {
     width: 44,
     height: 44,
-    alignItems: 'center',
-    justifyContent: 'flex-start',
+    alignItems: "center",
+    justifyContent: "flex-start",
     paddingTop: 2,
   },
   iconEmoji: {
@@ -102,22 +103,22 @@ const styles = StyleSheet.create({
   },
   ideaTitle: {
     fontSize: 16.5,
-    fontWeight: '700',
+    fontWeight: "700",
     color: Colors.iconDark,
     lineHeight: 22,
     letterSpacing: -0.2,
   },
   ideaDescription: {
     fontSize: 14,
-    fontWeight: '400',
-    color: '#707070',
+    fontWeight: "400",
+    color: "#707070",
     lineHeight: 20,
     marginTop: 6,
     letterSpacing: -0.1,
   },
   divider: {
     height: 1,
-    backgroundColor: '#F0F0F2',
+    backgroundColor: "#F0F0F2",
     marginHorizontal: 20,
   },
 });

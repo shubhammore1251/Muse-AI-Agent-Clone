@@ -167,12 +167,6 @@ export default function TabLayout() {
               ),
             }}
           />
-          <Tabs.Screen
-            name="tools"
-            options={{
-              href: null,
-            }}
-          />
         </Tabs>
       </View>
 

@@ -4,23 +4,59 @@
  * Simple 3D character mascot avatar portrait.
  */
 
-import React from 'react';
-import { Image, StyleSheet, ImageStyle, StyleProp } from 'react-native';
+import { Colors } from "@/constants/colors";
+import React from "react";
+import {
+  Image,
+  ImageStyle,
+  StyleProp,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 
 export interface MascotAvatarProps {
   /** Avatar diameter in pixels (defaults to 54) */
   size?: number;
+  /** Emoji avatar icon, or 'cooper' to render the original mascot image */
+  icon?: string;
+  /** Accent color for emoji avatar backgrounds */
+  color?: string;
   /** Optional custom image style */
   style?: StyleProp<ImageStyle>;
 }
 
 export const MascotAvatar: React.FC<MascotAvatarProps> = ({
   size = 54,
+  icon = "cooper",
+  color = Colors.primary,
   style,
 }) => {
+  if (icon !== "cooper") {
+    return (
+      <View
+        style={[
+          styles.emojiAvatar,
+          {
+            width: size,
+            height: size,
+            borderRadius: size / 2,
+            backgroundColor: `${color}18`,
+            borderColor: color,
+          },
+          style as any,
+        ]}
+      >
+        <Text style={[styles.emojiText, { fontSize: Math.round(size * 0.52) }]}>
+          {icon}
+        </Text>
+      </View>
+    );
+  }
+
   return (
     <Image
-      source={require('../../../assets/images/cooper_mascot.jpg')}
+      source={require("../../../assets/images/cooper_mascot.jpg")}
       style={[
         styles.avatar,
         {
@@ -37,9 +73,18 @@ export const MascotAvatar: React.FC<MascotAvatarProps> = ({
 
 const styles = StyleSheet.create({
   avatar: {
-    backgroundColor: '#F3F4F6',
+    backgroundColor: Colors.avatarPreviewBg,
+  },
+  emojiAvatar: {
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1.5,
+  },
+  emojiText: {
+    textAlign: "center",
+    includeFontPadding: false,
+    lineHeight: undefined,
   },
 });
 
 export default MascotAvatar;
-

@@ -1,8 +1,3 @@
-// import {
-//   createCooperAgentForUser,
-//   mapMessages,
-//   parseToolOutput,
-// } from '@/lib/composioAgent';
 import {
   createCooperAgentForUser,
   mapMessages,
@@ -10,54 +5,29 @@ import {
 } from "@/lib/composioAgent";
 import { validateUserFromRequest } from "@/lib/composioBackend";
 import { parseScheduleIntentWithAgent } from "@/lib/scheduleIntentAgent";
-
 import { closeBrowserSessions } from "@/services/tools/BrowserbaseSession";
-import { ChatMessage } from "@/types";
 import { run } from "@openai/agents";
-
-type ChatRequestBody = {
-  messages: ChatMessage[];
-};
-
-console.log("OPENAI KEY AVAILABLE:", !!process.env.OPENAI_API_KEY);
 
 export async function POST(req: Request) {
   let reqBody: any = {};
-
   try {
     reqBody = await req.json();
   } catch {
-    return Response.json(
-      { error: "Invalid JSON request body" },
-      { status: 400 },
-    );
+    reqBody = {};
   }
 
   const { messages = [], timezone } = reqBody;
 
-  if (!Array.isArray(messages) || messages.length === 0) {
-    return Response.json(
-      { error: "messages must be a non-empty array" },
-      { status: 400 },
-    );
-  }
-
   let activeUserId: string | null = null;
-
   try {
-    const userAuth = await validateUserFromRequest(req);
+    const userAuth = await validateUserFromRequest(req, reqBody.userId);
     activeUserId = userAuth.userId;
-  } catch (error) {
-    console.error("[chat+api] User validation failed:", error);
-    return Response.json(
-      { error: "Unauthorized. Please sign in again." },
-      { status: 401 },
-    );
+  } catch {
+    activeUserId = reqBody.userId || null;
   }
 
   const encoder = new TextEncoder();
-
-  const stream = new ReadableStream<Uint8Array>({
+  const stream = new ReadableStream({
     async start(controller) {
       const send = (data: unknown) => {
         controller.enqueue(encoder.encode(`${JSON.stringify(data)}\n`));
@@ -73,7 +43,6 @@ export async function POST(req: Request) {
             (message: any) =>
               message?.sender === "user" && typeof message?.text === "string",
           );
-
         const scheduleConfirmation = latestUserMessage
           ? await parseScheduleIntentWithAgent({
               text: latestUserMessage.text,
@@ -90,14 +59,7 @@ export async function POST(req: Request) {
           return;
         }
 
-        // Use the user-specific agent and the existing
-        // browser-compatible message mapper.
         const agent = await createCooperAgentForUser(activeUserId || "");
-
-        console.log("[chat+api] Starting agent:", {
-          messageCount: messages.length,
-        });
-
         const result = await run(agent, mapMessages(messages), {
           stream: true,
           maxTurns: 30,
@@ -118,7 +80,6 @@ export async function POST(req: Request) {
             typeof output.sessionId === "string"
           ) {
             browserSessionIds.add(output.sessionId);
-
             send({
               type: "browser",
               browser: output,
@@ -140,20 +101,15 @@ export async function POST(req: Request) {
         await result.completed;
 
         const output = result.finalOutput ?? "";
-        const connectCta = extractConnectCta(output);
 
+        const connectCta = extractConnectCta(output);
         send({
           type: "final",
           output: connectCta ? cleanConnectLinkFromOutput(output) : output,
           connectCta,
         });
-
-        console.log("[chat+api] Agent completed:", {
-          outputLength: output.length,
-        });
       } catch (error) {
-        console.error("[chat+api] Agent error:", error);
-
+        console.error("[chat+api] Composio agent error:", error);
         send({
           type: "error",
           message: getAgentErrorMessage(error),
@@ -164,49 +120,24 @@ export async function POST(req: Request) {
             await closeBrowserSessions(browserSessionIds);
           } catch (closeError) {
             console.error(
-              "[chat+api] Browser session cleanup failed:",
+              "[chat+api] Browserbase session pause failed:",
               closeError,
             );
           }
         }
 
-        try {
-          controller.close();
-        } catch {
-          // The client may have already closed the stream.
-        }
+        controller.close();
       }
     },
   });
 
   return new Response(stream, {
     headers: {
-      "Content-Type": "application/x-ndjson; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
+      "Content-Type": "application/x-ndjson",
+      "Cache-Control": "no-cache",
     },
   });
 }
-
-// const MapAgentInput = (messages: ChatMessage[]): AgentInputItem[] => {
-//   return messages.map((message: ChatMessage) => {
-//     if (message.sender === "agent") {
-//       return {
-//         role: "assistant",
-//         status: "completed",
-//         content: [
-//           {
-//             type: "output_text",
-//             text: message.text,
-//           },
-//         ],
-//       };
-//     }
-//     return {
-//       role: "user",
-//       content: message.text,
-//     };
-//   });
-// };
 
 function getAgentErrorMessage(error: unknown) {
   if (error instanceof Error) {

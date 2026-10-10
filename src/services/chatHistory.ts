@@ -192,3 +192,22 @@ export const saveMessage = async (
 
   return data;
 };
+
+export const updateMessage = async (
+  messageId: string,
+  content: string,
+  metadata: any,
+) => {
+  const { data, error } = await supabase
+    .from("chat_messages")
+    .update({
+      content,
+      metadata,
+    })
+    .eq("id", messageId)
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data;
+};

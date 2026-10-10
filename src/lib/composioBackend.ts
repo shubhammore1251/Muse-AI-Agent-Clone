@@ -16,6 +16,11 @@ const KNOWN_AUTH_CONFIGS: Record<string, string> = {
   outlook: "ac_3xlHBD4sAC35",
   trello: "ac_cUrZgDPrPOIi",
   jira: "ac_W8UkzDnBYdPz",
+  calcom: "ac_xloe2MCIaqsY",
+  calendly: "ac_hDTqXRLy0k87",
+  google_meet: "ac_qTcJN0MUIWyb",
+  zoom: "ac_NC_rJ8N76rkd",
+  microsoftteams: "ac_7Ln0XDkTbVmN",
 };
 
 export function getComposioClient(): Composio {
@@ -89,31 +94,35 @@ export function getSupabaseAdminClient(userToken?: string) {
 
 export async function validateUserFromRequest(
   req: Request,
-): Promise<{ userId: string; userEmail?: string; token: string }> {
-  const authHeader = req.headers.get("Authorization");
-
-  if (!authHeader?.startsWith("Bearer ")) {
-    throw new Error("Missing Bearer authorization token.");
-  }
-
-  const token = authHeader.substring(7).trim();
-
-  if (!token) {
-    throw new Error("Empty authorization token.");
-  }
-
+  bodyUserId?: string,
+): Promise<{ userId: string; userEmail?: string; token?: string }> {
   const supabaseAdmin = getSupabaseAdminClient();
-  const { data, error } = await supabaseAdmin.auth.getUser(token);
+  const authHeader =
+    req.headers.get("Authorization") || req.headers.get("authorization");
 
-  if (error || !data.user) {
-    throw new Error("Invalid or expired Supabase access token.");
+  if (authHeader?.startsWith("Bearer ")) {
+    const token = authHeader.substring(7).trim();
+    const { data, error } = await supabaseAdmin.auth.getUser(token);
+    if (!error && data?.user) {
+      return {
+        userId: data.user.id,
+        userEmail: data.user.email,
+        token,
+      };
+    }
   }
 
-  return {
-    userId: data.user.id,
-    userEmail: data.user.email,
-    token,
-  };
+  if (
+    bodyUserId &&
+    typeof bodyUserId === "string" &&
+    bodyUserId.trim().length > 0
+  ) {
+    return { userId: bodyUserId.trim() };
+  }
+
+  throw new Error(
+    "Unauthorized: Valid authorization token or userId is required.",
+  );
 }
 
 function accountMatchesTool(account: any, tool: any) {
@@ -143,6 +152,26 @@ async function findActiveConnectedAccountForTool(
       accountMatchesTool(account, tool),
     ) || null
   );
+}
+
+async function listConnectedAccountsForUser(
+  composio: Composio,
+  userId: string,
+) {
+  const accounts: any[] = [];
+  let cursor: string | undefined;
+
+  do {
+    const page = await composio.connectedAccounts.list({
+      userIds: [userId],
+      limit: 100,
+      ...(cursor ? { cursor } : {}),
+    });
+    accounts.push(...page.items);
+    cursor = page.nextCursor || undefined;
+  } while (cursor);
+
+  return new Map(accounts.map((account) => [account.id, account]));
 }
 
 async function resolveAuthConfigId(
@@ -185,21 +214,22 @@ async function resolveAuthConfigId(
   );
 }
 
-function mapComposioStatus(statusStr?: string): ToolConnectionStatus {
-  if (!statusStr) return "pending";
-  const status = statusStr.toUpperCase();
-  if (status === "ACTIVE" || status === "CONNECTED" || status === "SUCCESS")
-    return "connected";
-  if (
-    status === "INITIATED" ||
-    status === "INITIALIZING" ||
-    status === "PENDING"
-  )
-    return "pending";
-  if (status === "FAILED" || status === "ERROR") return "failed";
-  if (status === "REVOKED" || status === "EXPIRED" || status === "DISABLED")
-    return "revoked";
-  return "pending";
+function mapComposioStatus(status: string): ToolConnectionStatus | null {
+  switch (status) {
+    case "ACTIVE":
+      return "connected";
+    case "INITIALIZING":
+    case "INITIATED":
+      return "pending";
+    case "FAILED":
+      return "failed";
+    case "EXPIRED":
+    case "INACTIVE":
+    case "REVOKED":
+      return "revoked";
+    default:
+      return null;
+  }
 }
 
 function getAccountEmail(account: any) {
@@ -347,6 +377,223 @@ export interface CheckStatusResult {
   composioConnectedAccountId: string | null;
   composioConnectionRequestId: string | null;
   lastCheckedAt: string;
+  verificationStatus: "verified" | "unavailable";
+  verificationError?: string;
+}
+
+type StoredConnectionWithTool = UserToolConnection & {
+  tools?:
+    | { slug?: string; toolkit_slug?: string }
+    | Array<{ slug?: string; toolkit_slug?: string }>;
+};
+
+async function syncStoredConnectionStatus(
+  supabase: ReturnType<typeof getSupabaseAdminClient>,
+  userId: string,
+  connection: StoredConnectionWithTool,
+  userAccounts: Map<string, any>,
+): Promise<CheckStatusResult> {
+  const now = new Date().toISOString();
+  const tool = Array.isArray(connection.tools)
+    ? connection.tools[0]
+    : connection.tools;
+  const accountId = connection.composio_connected_account_id;
+  const requestId = connection.composio_connection_request_id;
+  const idToCheck = accountId || requestId;
+
+  const save = async (updates: Record<string, unknown>) => {
+    const { error } = await supabase
+      .from("user_tool_connections")
+      .update({ ...updates, last_checked_at: now })
+      .eq("id", connection.id)
+      .eq("user_id", userId);
+    if (error)
+      throw new Error(`Failed to update connection status: ${error.message}`);
+  };
+
+  const result = (
+    status: ToolConnectionStatus,
+    verificationStatus: "verified" | "unavailable",
+    verificationError?: string,
+    account?: any,
+  ): CheckStatusResult => ({
+    success: true,
+    toolId: connection.tool_id,
+    status,
+    connectedLabel: account
+      ? getAccountLabel(account)
+      : connection.connected_label,
+    connectedEmail: account
+      ? getAccountEmail(account)
+      : connection.connected_email,
+    composioConnectedAccountId: account?.id || accountId || null,
+    composioConnectionRequestId: status === "connected" ? null : requestId,
+    lastCheckedAt: now,
+    verificationStatus,
+    ...(verificationError ? { verificationError } : {}),
+  });
+
+  if (!idToCheck) {
+    if (connection.status === "connected" || connection.status === "pending") {
+      await save({ status: "failed" });
+      return result(
+        "failed",
+        "verified",
+        "Connection details are missing. Reconnect to continue.",
+      );
+    }
+    return result(connection.status, "verified");
+  }
+
+  const account = userAccounts.get(idToCheck);
+  if (!account) {
+    if (accountId) {
+      await save({ status: "revoked" });
+      return result(
+        "revoked",
+        "verified",
+        "Reconnect this integration to continue.",
+      );
+    }
+    if (connection.status === "pending") {
+      return result(
+        "pending",
+        "unavailable",
+        "Authorization is still pending. Check again shortly.",
+      );
+    }
+    if (connection.status === "connected") {
+      await save({ status: "failed" });
+      return result(
+        "failed",
+        "verified",
+        "Connection details are missing. Reconnect to continue.",
+      );
+    }
+    return result(connection.status, "verified");
+  }
+
+  const accountToolkit = account.toolkit?.slug?.toLowerCase();
+  const expectedToolkit = (
+    tool?.toolkit_slug ||
+    tool?.slug ||
+    ""
+  ).toLowerCase();
+  if (accountToolkit && expectedToolkit && accountToolkit !== expectedToolkit) {
+    await save({ status: "revoked" });
+    return result(
+      "revoked",
+      "verified",
+      "Reconnect this integration to continue.",
+    );
+  }
+
+  const status = account.isDisabled
+    ? "revoked"
+    : mapComposioStatus(account.status);
+  if (!status) {
+    await save({});
+    return result(
+      connection.status,
+      "unavailable",
+      "Composio returned an unrecognized connection status.",
+    );
+  }
+
+  await save({
+    status,
+    composio_connected_account_id: account.id,
+    composio_connection_request_id: status === "pending" ? requestId : null,
+    connected_label: getAccountLabel(account) || connection.connected_label,
+    connected_email: getAccountEmail(account) || connection.connected_email,
+    ...(status === "connected" && !connection.connected_at
+      ? { connected_at: now }
+      : {}),
+  });
+  return result(status, "verified", undefined, account);
+}
+
+export async function syncUserToolConnectionStatuses({
+  userId,
+  userToken,
+}: {
+  userId: string;
+  userToken?: string;
+}): Promise<CheckStatusResult[]> {
+  if (!userId) throw new Error("Authenticated user is required.");
+
+  const supabase = getSupabaseAdminClient(userToken);
+  const { data: connections, error } = await supabase
+    .from("user_tool_connections")
+    .select("*, tools!inner(slug, toolkit_slug)")
+    .eq("user_id", userId);
+  if (error)
+    throw new Error(`Failed to load tool connections: ${error.message}`);
+
+  const composio = getComposioClient();
+  let userAccounts: Map<string, any>;
+  try {
+    userAccounts = await listConnectedAccountsForUser(composio, userId);
+  } catch (error: any) {
+    console.warn("[composioBackend] Failed to list user's Composio accounts:", {
+      userId,
+      error: error?.message || error,
+    });
+    return ((connections || []) as StoredConnectionWithTool[]).map(
+      (connection) => ({
+        success: false,
+        toolId: connection.tool_id,
+        status: connection.status,
+        connectedLabel: connection.connected_label,
+        connectedEmail: connection.connected_email,
+        composioConnectedAccountId: connection.composio_connected_account_id,
+        composioConnectionRequestId: connection.composio_connection_request_id,
+        lastCheckedAt: connection.last_checked_at || new Date().toISOString(),
+        verificationStatus: "unavailable" as const,
+        verificationError:
+          "Could not verify this connection right now. The last known status is shown.",
+      }),
+    );
+  }
+
+  return Promise.all(
+    ((connections || []) as StoredConnectionWithTool[]).map(
+      async (connection) => {
+        try {
+          return await syncStoredConnectionStatus(
+            supabase,
+            userId,
+            connection,
+            userAccounts,
+          );
+        } catch (error: any) {
+          console.warn(
+            "[composioBackend] Failed to synchronize connection row:",
+            {
+              toolId: connection.tool_id,
+              error: error?.message || error,
+            },
+          );
+          return {
+            success: false,
+            toolId: connection.tool_id,
+            status: connection.status,
+            connectedLabel: connection.connected_label,
+            connectedEmail: connection.connected_email,
+            composioConnectedAccountId:
+              connection.composio_connected_account_id,
+            composioConnectionRequestId:
+              connection.composio_connection_request_id,
+            lastCheckedAt:
+              connection.last_checked_at || new Date().toISOString(),
+            verificationStatus: "unavailable" as const,
+            verificationError:
+              "Could not verify this connection right now. The last known status is shown.",
+          };
+        }
+      },
+    ),
+  );
 }
 
 export async function checkToolConnectionStatus({
@@ -360,96 +607,40 @@ export async function checkToolConnectionStatus({
     );
   }
 
-  const composio = getComposioClient();
   const supabase = getSupabaseAdminClient(userToken);
-  const { tool, resolvedToolId } = await resolveTool(supabase, toolId);
+  const { resolvedToolId } = await resolveTool(supabase, toolId);
 
-  const { data: connection } = await supabase
+  const { data: connection, error } = await supabase
     .from("user_tool_connections")
-    .select("*")
+    .select("*, tools!inner(slug, toolkit_slug)")
     .eq("user_id", userId)
     .eq("tool_id", resolvedToolId)
     .maybeSingle();
-
-  const conn = connection as UserToolConnection | null;
-  const activeAccount = tool
-    ? await findActiveConnectedAccountForTool(composio, userId, tool)
-    : null;
-
-  if (activeAccount) {
-    await upsertConnection(
-      supabase,
-      userId,
-      resolvedToolId,
-      "connected",
-      activeAccount,
-    );
+  if (error)
+    throw new Error(`Failed to load tool connection: ${error.message}`);
+  if (!connection) {
     const now = new Date().toISOString();
     return {
       success: true,
       toolId: resolvedToolId,
-      status: "connected",
-      connectedLabel: getAccountLabel(activeAccount),
-      connectedEmail: getAccountEmail(activeAccount),
-      composioConnectedAccountId: activeAccount.id,
+      status: "not_connected",
+      connectedLabel: null,
+      connectedEmail: null,
+      composioConnectedAccountId: null,
       composioConnectionRequestId: null,
       lastCheckedAt: now,
+      verificationStatus: "verified",
     };
   }
 
-  const composioId =
-    conn?.composio_connected_account_id || conn?.composio_connection_request_id;
-  let status: ToolConnectionStatus = conn?.status || "not_connected";
-  let connectedLabel = conn?.connected_label || null;
-  let connectedEmail = conn?.connected_email || null;
-  let connectedAccountId = conn?.composio_connected_account_id || null;
-
-  if (composioId) {
-    try {
-      const account: any = await composio.connectedAccounts.get(composioId);
-      status = mapComposioStatus(account.status);
-      connectedAccountId = account.id || connectedAccountId;
-      connectedEmail = getAccountEmail(account) || connectedEmail;
-      connectedLabel = getAccountLabel(account) || connectedLabel;
-    } catch (error: any) {
-      console.warn(
-        `[composioBackend] Failed to fetch account (${composioId}):`,
-        error,
-      );
-      if (error?.message?.includes("not found") || error?.statusCode === 404) {
-        status = "revoked";
-      }
-    }
-  }
-
-  const now = new Date().toISOString();
-  if (conn?.id) {
-    await supabase
-      .from("user_tool_connections")
-      .update({
-        status,
-        composio_connected_account_id: connectedAccountId,
-        connected_label: connectedLabel,
-        connected_email: connectedEmail,
-        last_checked_at: now,
-        updated_at: now,
-        ...(status === "connected" && !conn.connected_at
-          ? { connected_at: now }
-          : {}),
-      })
-      .eq("id", conn.id);
-  }
-
-  return {
-    success: true,
-    toolId: resolvedToolId,
-    status,
-    connectedLabel,
-    connectedEmail,
-    composioConnectedAccountId: connectedAccountId,
-    composioConnectionRequestId: conn?.composio_connection_request_id || null,
-    lastCheckedAt: now,
-  };
+  const composio = getComposioClient();
+  const userAccounts = await listConnectedAccountsForUser(composio, userId);
+  return syncStoredConnectionStatus(
+    supabase,
+    userId,
+    connection as StoredConnectionWithTool,
+    userAccounts,
+  );
 }
 
 export interface DisconnectParams {

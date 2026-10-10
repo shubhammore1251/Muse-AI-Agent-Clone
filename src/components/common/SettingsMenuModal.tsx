@@ -10,27 +10,27 @@
  * 5. Delete Chat Session (Destructive)
  */
 
-import React from 'react';
+import { Colors } from "@/constants/colors";
+import { showToast } from "@/context/ToastContext";
 import {
-  View,
-  Text,
-  StyleSheet,
-  Modal,
-  TouchableOpacity,
-  TouchableWithoutFeedback,
-  Platform,
-} from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { HugeiconsIcon } from '@hugeicons/react-native';
-import {
-  Edit01Icon,
   Delete02Icon,
+  Edit01Icon,
+  RefreshIcon,
   Share01Icon,
   SparklesIcon,
-  RefreshIcon,
-} from '@hugeicons/core-free-icons';
-import { Colors } from '@/constants/colors';
-import { showToast } from '@/context/ToastContext';
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react-native";
+import React from "react";
+import {
+  Modal,
+  Platform,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  TouchableWithoutFeedback,
+  View,
+} from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 export interface SettingsMenuModalProps {
   /** Visibility state of the dropdown overlay */
@@ -68,24 +68,30 @@ export const SettingsMenuModal: React.FC<SettingsMenuModalProps> = ({
       visible={visible}
       transparent
       animationType="fade"
-      onRequestClose={onClose}>
+      onRequestClose={onClose}
+    >
       <TouchableWithoutFeedback onPress={onClose}>
         <View
           style={[
             styles.overlay,
-            { paddingTop: Math.max(insets.top, 12) + (Platform.OS === 'web' ? 54 : 50) },
-          ]}>
+            {
+              paddingTop:
+                Math.max(insets.top, 12) + (Platform.OS === "web" ? 54 : 50),
+            },
+          ]}
+        >
           <TouchableWithoutFeedback>
             <View style={styles.dropdownCard}>
               {/* 1. Edit Mascot & Avatar */}
               <TouchableOpacity
                 style={styles.menuItem}
                 onPress={() => {
-                  showToast('Edit Mascot & Avatar');
+                  showToast("Edit Mascot & Avatar");
                   onClose();
                   onEditAvatar();
                 }}
-                activeOpacity={0.7}>
+                activeOpacity={0.7}
+              >
                 <HugeiconsIcon
                   icon={SparklesIcon}
                   size={18}
@@ -99,11 +105,12 @@ export const SettingsMenuModal: React.FC<SettingsMenuModalProps> = ({
               <TouchableOpacity
                 style={styles.menuItem}
                 onPress={() => {
-                  showToast('Rename Agent');
+                  showToast("Rename Agent");
                   onClose();
                   onRename();
                 }}
-                activeOpacity={0.7}>
+                activeOpacity={0.7}
+              >
                 <HugeiconsIcon
                   icon={Edit01Icon}
                   size={18}
@@ -117,11 +124,12 @@ export const SettingsMenuModal: React.FC<SettingsMenuModalProps> = ({
               <TouchableOpacity
                 style={styles.menuItem}
                 onPress={() => {
-                  showToast('Export Chat');
+                  showToast("Export Chat");
                   onClose();
                   onShareChat?.();
                 }}
-                activeOpacity={0.7}>
+                activeOpacity={0.7}
+              >
                 <HugeiconsIcon
                   icon={Share01Icon}
                   size={18}
@@ -135,11 +143,12 @@ export const SettingsMenuModal: React.FC<SettingsMenuModalProps> = ({
               <TouchableOpacity
                 style={styles.menuItem}
                 onPress={() => {
-                  showToast('Clear Messages');
+                  showToast("Clear Messages");
                   onClose();
                   onClearChat();
                 }}
-                activeOpacity={0.7}>
+                activeOpacity={0.7}
+              >
                 <HugeiconsIcon
                   icon={RefreshIcon}
                   size={18}
@@ -155,18 +164,21 @@ export const SettingsMenuModal: React.FC<SettingsMenuModalProps> = ({
               <TouchableOpacity
                 style={[styles.menuItem, styles.dangerItem]}
                 onPress={() => {
-                  showToast('Delete Chat');
+                  showToast("Delete Chat");
                   onClose();
                   onDeleteChat();
                 }}
-                activeOpacity={0.7}>
+                activeOpacity={0.7}
+              >
                 <HugeiconsIcon
                   icon={Delete02Icon}
                   size={18}
                   color={Colors.error}
                   strokeWidth={1.8}
                 />
-                <Text style={[styles.itemText, styles.dangerText]}>Delete Chat</Text>
+                <Text style={[styles.itemText, styles.dangerText]}>
+                  Delete Chat
+                </Text>
               </TouchableOpacity>
             </View>
           </TouchableWithoutFeedback>
@@ -179,10 +191,10 @@ export const SettingsMenuModal: React.FC<SettingsMenuModalProps> = ({
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.08)',
-    justifyContent: 'flex-start',
-    alignItems: 'flex-end',
-    paddingTop: Platform.OS === 'ios' ? 64 : 56,
+    backgroundColor: "rgba(0, 0, 0, 0.08)",
+    justifyContent: "flex-start",
+    alignItems: "flex-end",
+    paddingTop: Platform.OS === "ios" ? 64 : 56,
     paddingRight: 16,
   },
   dropdownCard: {
@@ -204,13 +216,14 @@ const styles = StyleSheet.create({
         elevation: 8,
       },
       web: {
-        boxShadow: '0 8px 24px rgba(15, 23, 42, 0.12), 0 2px 6px rgba(15, 23, 42, 0.04)',
+        boxShadow:
+          "0 8px 24px rgba(15, 23, 42, 0.12), 0 2px 6px rgba(15, 23, 42, 0.04)",
       },
     }),
   },
   menuItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     paddingVertical: 9,
     paddingHorizontal: 10,
     borderRadius: 9,
@@ -221,13 +234,13 @@ const styles = StyleSheet.create({
   },
   itemText: {
     fontSize: 13.5,
-    fontWeight: '500',
+    fontWeight: "500",
     color: Colors.textPrimary,
     letterSpacing: -0.2,
   },
   dangerText: {
     color: Colors.error,
-    fontWeight: '500',
+    fontWeight: "500",
   },
   divider: {
     height: 1,

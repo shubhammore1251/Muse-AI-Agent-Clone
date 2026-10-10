@@ -10,6 +10,7 @@
  */
 
 import {
+  AiNewsItem,
   ChatMessage,
   ConnectorItem,
   IdeaItem,
@@ -28,7 +29,7 @@ export const INITIAL_CHAT_MESSAGES: ChatMessage[] = [
   {
     id: "msg-1",
     sender: "user",
-    text: "I want to start a health goal !",
+    text: "I want to start a health goal",
     timestamp: "3:35 PM",
   },
   {
@@ -71,6 +72,62 @@ export const SIDE_CHATS: SideChatItem[] = [
 ];
 
 /**
+ * Dummy AI news stories displayed in the Feed tab.
+ */
+export const AI_NEWS_ITEMS: AiNewsItem[] = [
+  {
+    id: "ai-news-1",
+    source: "Muse Brief",
+    category: "Research",
+    title: "New reasoning models focus on longer autonomous task chains",
+    summary:
+      "Labs are testing agents that can plan, inspect tool results, and recover from failed steps across multi-hour workflows.",
+    timeAgo: "12 min ago",
+    readTime: "3 min read",
+  },
+  {
+    id: "ai-news-2",
+    source: "Builder Weekly",
+    category: "Tools",
+    title: "Agent app builders add browser, calendar, and workspace actions",
+    summary:
+      "The newest developer kits make it easier for assistants to complete practical jobs across tabs, files, and connected services.",
+    timeAgo: "38 min ago",
+    readTime: "4 min read",
+  },
+  {
+    id: "ai-news-3",
+    source: "Model Watch",
+    category: "Product",
+    title: "Voice companions are moving from chat mode into daily routines",
+    summary:
+      "Consumer AI apps are pairing conversational memory with reminders, habit check-ins, and lightweight personal automation.",
+    timeAgo: "1 hr ago",
+    readTime: "2 min read",
+  },
+  {
+    id: "ai-news-4",
+    source: "Policy Radar",
+    category: "Policy",
+    title: "AI safety teams publish fresh guidance for agent permissions",
+    summary:
+      "New recommendations emphasize scoped access, visible approval moments, and logs for assistants that can act on behalf of users.",
+    timeAgo: "2 hrs ago",
+    readTime: "5 min read",
+  },
+  {
+    id: "ai-news-5",
+    source: "Startup Signal",
+    category: "Funding",
+    title: "Automation startups see renewed investor demand",
+    summary:
+      "Teams building vertical agents for sales, support, and operations are attracting attention as businesses look for measurable AI output.",
+    timeAgo: "Today",
+    readTime: "3 min read",
+  },
+];
+
+/**
  * Curated idea templates presented on the Ideas tab.
  */
 export const IDEA_ITEMS: IdeaItem[] = [
@@ -106,7 +163,7 @@ export const IDEA_ITEMS: IdeaItem[] = [
     icon: "🚀",
     title: "I can build your launch post and assets",
     description:
-      "I can track the top Product Hunt and Hacker News launch sources you pick and draft launch copy, screenshot mockups, and community responses.",
+      "I can track the launch sources you pick and draft launch copy, screenshot mockups, and community responses.",
     prompt:
       "Draft my product launch copy, headline variations, and Product Hunt announcement strategy.",
   },

@@ -8,24 +8,27 @@
  * - Clean Save & Cancel actions
  */
 
-import React, { useState, useEffect } from 'react';
+import { Colors } from "@/constants/colors";
+import { showToast } from "@/context/ToastContext";
+import { AgentProfile } from "@/types";
 import {
-  View,
-  Text,
-  StyleSheet,
+  Cancel01Icon,
+  CheckmarkCircle02Icon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react-native";
+import React, { useEffect, useState } from "react";
+import {
+  KeyboardAvoidingView,
   Modal,
+  Platform,
+  StyleSheet,
+  Text,
   TextInput,
   TouchableOpacity,
   TouchableWithoutFeedback,
-  KeyboardAvoidingView,
-  Platform,
-} from 'react-native';
-import { HugeiconsIcon } from '@hugeicons/react-native';
-import { Cancel01Icon, CheckmarkCircle02Icon } from '@hugeicons/core-free-icons';
-import { Colors } from '@/constants/colors';
-import MascotAvatar from './MascotAvatar';
-import { showToast } from '@/context/ToastContext';
-import { AgentProfile } from '@/types';
+  View,
+} from "react-native";
+import MascotAvatar from "./MascotAvatar";
 
 export interface EditAgentModalProps {
   visible: boolean;
@@ -38,32 +41,46 @@ export interface EditAgentModalProps {
 }
 
 const THEME_COLORS = [
-  '#2563EB', // Muse Blue
-  '#4F46E5', // Indigo
-  '#059669', // Emerald
-  '#D97706', // Amber
-  '#7C3AED', // Violet
-  '#E11D48', // Rose
+  Colors.primary,
+  Colors.avatarAccentIndigo,
+  Colors.avatarAccentEmerald,
+  Colors.avatarAccentAmber,
+  Colors.avatarAccentViolet,
+  Colors.avatarAccentRose,
+];
+
+const AVATAR_OPTIONS = [
+  "cooper",
+  "🤖",
+  "✨",
+  "🧠",
+  "🚀",
+  "💡",
+  "🎯",
+  "🌱",
+  "⚡",
 ];
 
 export const EditAgentModal: React.FC<EditAgentModalProps> = ({
   visible,
   initialName,
-  initialSubtitle = 'Autonomous Agent',
-  initialIcon = 'cooper',
+  initialSubtitle = "Autonomous Agent",
+  initialIcon = "cooper",
   initialColor = Colors.primary,
   onClose,
   onSave,
 }) => {
   const [name, setName] = useState(initialName);
+  const [selectedIcon, setSelectedIcon] = useState(initialIcon);
   const [selectedColor, setSelectedColor] = useState(initialColor);
 
   useEffect(() => {
     if (visible) {
       setName(initialName);
+      setSelectedIcon(initialIcon);
       setSelectedColor(initialColor);
     }
-  }, [visible, initialName, initialColor]);
+  }, [visible, initialName, initialIcon, initialColor]);
 
   const handleSave = () => {
     const trimmed = name.trim();
@@ -72,10 +89,10 @@ export const EditAgentModal: React.FC<EditAgentModalProps> = ({
     onSave({
       name: trimmed,
       subtitle: initialSubtitle,
-      icon: initialIcon,
+      icon: selectedIcon,
       color: selectedColor,
     });
-    showToast('Agent updated');
+    showToast("Agent updated");
     onClose();
   };
 
@@ -84,12 +101,14 @@ export const EditAgentModal: React.FC<EditAgentModalProps> = ({
       visible={visible}
       transparent
       animationType="fade"
-      onRequestClose={onClose}>
+      onRequestClose={onClose}
+    >
       <TouchableWithoutFeedback onPress={onClose}>
         <View style={styles.overlay}>
           <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-            style={styles.keyboardContainer}>
+            behavior={Platform.OS === "ios" ? "padding" : undefined}
+            style={styles.keyboardContainer}
+          >
             <TouchableWithoutFeedback>
               <View style={styles.card}>
                 {/* Header with Close */}
@@ -98,14 +117,23 @@ export const EditAgentModal: React.FC<EditAgentModalProps> = ({
                   <TouchableOpacity
                     style={styles.closeBtn}
                     onPress={onClose}
-                    activeOpacity={0.7}>
-                    <HugeiconsIcon icon={Cancel01Icon} size={18} color={Colors.iconMuted} />
+                    activeOpacity={0.7}
+                  >
+                    <HugeiconsIcon
+                      icon={Cancel01Icon}
+                      size={18}
+                      color={Colors.iconMuted}
+                    />
                   </TouchableOpacity>
                 </View>
 
                 {/* Avatar Preview */}
                 <View style={styles.avatarSection}>
-                  <MascotAvatar size={64} />
+                  <MascotAvatar
+                    size={68}
+                    icon={selectedIcon}
+                    color={selectedColor}
+                  />
                 </View>
 
                 {/* Name Input */}
@@ -123,6 +151,39 @@ export const EditAgentModal: React.FC<EditAgentModalProps> = ({
                   />
                 </View>
 
+                {/* Emoji Avatar Picker */}
+                <View style={styles.avatarPickerGroup}>
+                  <Text style={styles.label}>Avatar</Text>
+                  <View style={styles.avatarGrid}>
+                    {AVATAR_OPTIONS.map((icon) => {
+                      const isSelected = selectedIcon === icon;
+                      return (
+                        <TouchableOpacity
+                          key={icon}
+                          style={[
+                            styles.avatarOption,
+                            isSelected && styles.avatarOptionSelected,
+                          ]}
+                          onPress={() => setSelectedIcon(icon)}
+                          activeOpacity={0.8}
+                          accessibilityRole="button"
+                          accessibilityLabel={
+                            icon === "cooper"
+                              ? "Cooper avatar"
+                              : `${icon} avatar`
+                          }
+                        >
+                          <MascotAvatar
+                            size={34}
+                            icon={icon}
+                            color={selectedColor}
+                          />
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                </View>
+
                 {/* Theme Color Dots */}
                 <View style={styles.colorGroup}>
                   <Text style={styles.label}>Theme</Text>
@@ -138,7 +199,8 @@ export const EditAgentModal: React.FC<EditAgentModalProps> = ({
                             isSelected && styles.colorDotSelected,
                           ]}
                           onPress={() => setSelectedColor(color)}
-                          activeOpacity={0.8}>
+                          activeOpacity={0.8}
+                        >
                           {isSelected && (
                             <HugeiconsIcon
                               icon={CheckmarkCircle02Icon}
@@ -158,14 +220,16 @@ export const EditAgentModal: React.FC<EditAgentModalProps> = ({
                   <TouchableOpacity
                     style={styles.cancelBtn}
                     onPress={onClose}
-                    activeOpacity={0.7}>
+                    activeOpacity={0.7}
+                  >
                     <Text style={styles.cancelText}>Cancel</Text>
                   </TouchableOpacity>
 
                   <TouchableOpacity
                     style={[styles.saveBtn, { backgroundColor: selectedColor }]}
                     onPress={handleSave}
-                    activeOpacity={0.8}>
+                    activeOpacity={0.8}
+                  >
                     <Text style={styles.saveText}>Save</Text>
                   </TouchableOpacity>
                 </View>
@@ -181,17 +245,17 @@ export const EditAgentModal: React.FC<EditAgentModalProps> = ({
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.4)',
-    justifyContent: 'center',
-    alignItems: 'center',
+    backgroundColor: "rgba(0, 0, 0, 0.4)",
+    justifyContent: "center",
+    alignItems: "center",
     padding: 24,
   },
   keyboardContainer: {
-    width: '100%',
-    alignItems: 'center',
+    width: "100%",
+    alignItems: "center",
   },
   card: {
-    width: '100%',
+    width: "100%",
     maxWidth: 340,
     backgroundColor: Colors.white,
     borderRadius: 20,
@@ -207,19 +271,19 @@ const styles = StyleSheet.create({
         elevation: 8,
       },
       web: {
-        boxShadow: '0 12px 32px rgba(0, 0, 0, 0.15)',
+        boxShadow: "0 12px 32px rgba(0, 0, 0, 0.15)",
       },
     }),
   },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     marginBottom: 16,
   },
   title: {
     fontSize: 16,
-    fontWeight: '700',
+    fontWeight: "700",
     color: Colors.iconDark,
     letterSpacing: -0.2,
   },
@@ -227,13 +291,13 @@ const styles = StyleSheet.create({
     width: 28,
     height: 28,
     borderRadius: 14,
-    backgroundColor: '#F3F4F6',
-    alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: Colors.avatarPreviewBg,
+    alignItems: "center",
+    justifyContent: "center",
   },
   avatarSection: {
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     marginVertical: 10,
   },
   inputGroup: {
@@ -242,38 +306,61 @@ const styles = StyleSheet.create({
   },
   label: {
     fontSize: 11,
-    fontWeight: '600',
+    fontWeight: "600",
     color: Colors.iconMuted,
-    textTransform: 'uppercase',
+    textTransform: "uppercase",
     letterSpacing: 0.6,
     marginBottom: 6,
   },
   input: {
-    backgroundColor: '#F7F8FA',
+    backgroundColor: Colors.surfaceInput,
     borderRadius: 12,
     paddingHorizontal: 14,
     paddingVertical: 10,
     fontSize: 15,
-    fontWeight: '500',
+    fontWeight: "500",
     color: Colors.iconDark,
     borderWidth: 1,
-    borderColor: '#ECEEF0',
+    borderColor: Colors.inputBarBorder,
+  },
+  avatarPickerGroup: {
+    marginBottom: 14,
+  },
+  avatarGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  avatarOption: {
+    width: 46,
+    height: 46,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: Colors.avatarOptionBg,
+    borderWidth: 1,
+    borderColor: Colors.borderLight,
+  },
+  avatarOptionSelected: {
+    backgroundColor: Colors.avatarOptionSelectedBg,
+    borderColor: Colors.avatarOptionSelectedBorder,
+    borderWidth: 1.5,
   },
   colorGroup: {
     marginBottom: 20,
   },
   colorRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingVertical: 4,
   },
   colorDot: {
     width: 32,
     height: 32,
     borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
   },
   colorDotSelected: {
     borderWidth: 2.5,
@@ -291,33 +378,33 @@ const styles = StyleSheet.create({
     }),
   },
   actionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: 10,
   },
   cancelBtn: {
     flex: 1,
     height: 42,
     borderRadius: 21,
-    backgroundColor: '#F3F4F6',
-    alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: Colors.avatarPreviewBg,
+    alignItems: "center",
+    justifyContent: "center",
   },
   cancelText: {
     fontSize: 14,
-    fontWeight: '600',
+    fontWeight: "600",
     color: Colors.iconDark,
   },
   saveBtn: {
     flex: 1,
     height: 42,
     borderRadius: 21,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
   },
   saveText: {
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: "700",
     color: Colors.white,
   },
 });

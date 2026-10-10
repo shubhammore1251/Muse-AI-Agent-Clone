@@ -14,11 +14,11 @@ import { HugeiconsIcon } from "@hugeicons/react-native";
 import { Image } from "expo-image";
 import React from "react";
 import {
-    ActivityIndicator,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from "react-native";
 
 export interface ToolCardProps {
@@ -41,15 +41,25 @@ export const ToolCard: React.FC<ToolCardProps> = ({
   const isConnected = tool.status === "connected";
   const isPending = tool.status === "pending";
   const isFailed = tool.status === "failed";
+  const requiresReconnect =
+    tool.status === "revoked" && !!tool.composio_connected_account_id;
 
   // Subtitle resolution
   let subtitle = tool.description || null;
-  if (isConnected) {
+  if (tool.statusVerification === "unavailable") {
+    subtitle =
+      tool.statusVerificationError ||
+      "Status temporarily unavailable. Showing the last known state.";
+  } else if (isConnected) {
     subtitle = tool.connected_email || tool.connected_label || "Connected";
   } else if (isPending) {
     subtitle = "Authorization pending...";
   } else if (isFailed) {
-    subtitle = "Connection failed. Tap retry.";
+    subtitle = tool.statusVerificationError || "Connection failed. Tap retry.";
+  } else if (requiresReconnect) {
+    subtitle = "Reconnect required";
+  } else if (tool.status === "revoked") {
+    subtitle = "Disconnected";
   }
 
   return (
@@ -143,13 +153,15 @@ export const ToolCard: React.FC<ToolCardProps> = ({
             />
             <Text style={styles.pendingButtonText}>Pending...</Text>
           </TouchableOpacity>
-        ) : isFailed ? (
+        ) : isFailed || requiresReconnect ? (
           <TouchableOpacity
             style={styles.retryButton}
             onPress={() => onConnect?.(tool)}
             activeOpacity={0.7}
           >
-            <Text style={styles.retryButtonText}>Retry</Text>
+            <Text style={styles.retryButtonText}>
+              {requiresReconnect ? "Reconnect" : "Retry"}
+            </Text>
           </TouchableOpacity>
         ) : (
           <TouchableOpacity
