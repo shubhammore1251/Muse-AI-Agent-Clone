@@ -33,7 +33,7 @@ Optional:
 ```bash
 supabase secrets set \
   COMPOSIO_BASE_URL="https://backend.composio.dev" \
-  OPENAI_MODEL="gpt-4.1-mini"
+  OPENAI_MODEL="gpt-5-nano"
 ```
 
 `COMPOSIO_API_KEY` must be a Composio project key with access to connected accounts plus Tool Router session search and execute. If this key is missing those permissions, the function will return a clearer permission error.

@@ -662,7 +662,7 @@ async function runOpenAiTask({
     .filter(Boolean)
     .join("\n\n");
 
-  const model = getEnv("OPENAI_MODEL") || "gpt-4.1-mini";
+  const model = getEnv("OPENAI_MODEL") || "gpt-5-nano";
   let response: JsonRecord;
 
   try {

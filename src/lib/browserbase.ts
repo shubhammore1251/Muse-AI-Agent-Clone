@@ -60,7 +60,7 @@ export const createBrowser = async () => {
     browser,
 
     model: {
-      modelName: "openai/gpt-4o",
+      modelName: "openai/gpt-5-nano",
       apiKey: openaiApiKey,
     },
 
