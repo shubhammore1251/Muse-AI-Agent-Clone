@@ -127,13 +127,45 @@ export async function validateUserFromRequest(
 
 function accountMatchesTool(account: any, tool: any) {
   const accountToolkit = account?.toolkit?.slug?.toLowerCase();
+  const accountAuthToolkit = account?.authConfig?.toolkit?.slug?.toLowerCase();
   const toolSlug = tool?.slug?.toLowerCase();
   const toolkitSlug = tool?.toolkit_slug?.toLowerCase();
+
+  const normalizeFamily = (value?: string) => {
+    const normalized = (value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!normalized) return null;
+    if (/google/.test(normalized)) return "google";
+    return normalized;
+  };
+
+  const accountFamily = normalizeFamily(
+    accountToolkit || accountAuthToolkit || account?.authConfig?.name,
+  );
+  const toolFamily = normalizeFamily(toolSlug || toolkitSlug || tool?.name);
+
+  if (accountFamily && toolFamily && accountFamily === toolFamily) {
+    return true;
+  }
+
+  if (accountFamily === "google" && toolFamily === "google") {
+    return true;
+  }
 
   return (
     account?.authConfig?.id === tool?.composio_auth_config_id ||
     accountToolkit === toolkitSlug ||
+    accountAuthToolkit === toolkitSlug ||
+    accountAuthToolkit === toolSlug ||
     accountToolkit === toolSlug
+  );
+}
+
+export function findMatchingConnectedAccountForTool(
+  accounts: any[],
+  tool: any,
+) {
+  return (
+    accounts.find((account: any) => accountMatchesTool(account, tool)) || null
   );
 }
 
@@ -445,7 +477,10 @@ async function syncStoredConnectionStatus(
     return result(connection.status, "verified");
   }
 
-  const account = userAccounts.get(idToCheck);
+  const directAccount = userAccounts.get(idToCheck);
+  const account =
+    directAccount ||
+    (tool ? findMatchingConnectedAccountForTool([...userAccounts.values()], tool) : null);
   if (!account) {
     if (accountId) {
       await save({ status: "revoked" });

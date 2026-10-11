@@ -3,11 +3,11 @@ import { BrowserSessionToolOutput } from "@/types";
 
 import * as WebBrowser from "expo-web-browser";
 import {
-  ActivityIndicator,
-  StyleSheet,
-  Text,
-  TouchableOpacity,
-  View,
+    ActivityIndicator,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
 } from "react-native";
 import { WebView } from "react-native-webview";
 
@@ -57,7 +57,7 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
   browserPreviewFrame: {
-    height: 220,
+    height: 280,
     backgroundColor: Colors.white,
     minWidth: 200,
   },

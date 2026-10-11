@@ -30,6 +30,7 @@ import {
   SentIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react-native";
+import * as Clipboard from "expo-clipboard";
 import { useLocalSearchParams } from "expo-router";
 import * as WebBrowser from "expo-web-browser";
 import { useEffect, useRef, useState } from "react";
@@ -161,6 +162,7 @@ export default function ChatScreen() {
             hour: "2-digit",
             minute: "2-digit",
           }),
+          clarification: msg.metadata?.clarification,
           scheduleConfirmation: msg.metadata?.scheduleConfirmation,
           scheduleStatus: msg.metadata?.scheduleStatus,
           scheduledTaskId: msg.metadata?.scheduledTaskId,
@@ -202,8 +204,10 @@ export default function ChatScreen() {
     return () => sub.remove();
   }, []);
 
-  const handleSend = async () => {
-    const text = inputText.trim();
+  const submitPrompt = async (
+    text: string,
+    baseMessages: ChatMessage[] = messages,
+  ) => {
     if (!text || isLoadingMessages || isSendingRef.current) return;
 
     Keyboard.dismiss();
@@ -267,7 +271,7 @@ export default function ChatScreen() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          messages: [...messages, userMsg],
+          messages: [...baseMessages, userMsg],
           userId,
           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         }),
@@ -291,8 +295,6 @@ export default function ChatScreen() {
         });
 
         const lines = buffer.split("\n");
-
-        // Keep unfinished line
         buffer = lines.pop() ?? "";
 
         for (const line of lines) {
@@ -383,6 +385,45 @@ export default function ChatScreen() {
             }
           }
 
+          if (data.type === "clarification") {
+            if (isRequestCurrent()) {
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === agentMessageId
+                    ? {
+                        ...msg,
+                        text:
+                          data.output ??
+                          "How would you like me to handle this?",
+                        clarification: data.clarification,
+                      }
+                    : msg,
+                ),
+              );
+            }
+            stopAgentLoader();
+
+            const savedClarificationMessage = await saveMessage(
+              requestThreadId,
+              userEmail ?? "",
+              "assistant",
+              data.output ?? "How would you like me to handle this?",
+              {
+                clarification: data.clarification,
+              },
+            );
+
+            if (savedClarificationMessage?.id && isRequestCurrent()) {
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === agentMessageId
+                    ? { ...msg, id: savedClarificationMessage.id }
+                    : msg,
+                ),
+              );
+            }
+          }
+
           if (data.type === "error") {
             throw new Error(data.message);
           }
@@ -410,6 +451,22 @@ export default function ChatScreen() {
     } finally {
       stopAgentLoader();
     }
+  };
+
+  const handleSend = async () => {
+    const text = inputText.trim();
+    await submitPrompt(text);
+  };
+
+  const handleClarificationChoice = async (
+    messageId: string,
+    choice: "immediate" | "recurring",
+  ) => {
+    const message = messages.find((msg) => msg.id === messageId);
+    if (!message?.clarification || isSendingRef.current) return;
+
+    const selectionText = choice === "immediate" ? "Do it now" : "Schedule it";
+    await submitPrompt(selectionText, messages);
   };
 
   const handleOpenConnectLink = async (
@@ -524,6 +581,32 @@ export default function ChatScreen() {
     showToast("Edit the request, then send it again.");
   };
 
+  const handleCopy = async (message: string) => {
+    if (!message || typeof message !== "string") return;
+    try {
+      const textToCopy = message.trim();
+
+      if (!textToCopy) {
+        showToast("Nothing to copy");
+        return;
+      }
+
+      await Clipboard.setStringAsync(textToCopy);
+
+      // Verify by reading the clipboard back
+      const copiedText = await Clipboard.getStringAsync();
+
+      if (copiedText === textToCopy) {
+        showToast("Message copied to clipboard");
+      } else {
+        showToast("Clipboard verification failed");
+      }
+    } catch (error) {
+      console.error("Clipboard error:", error);
+      showToast("Failed to copy message");
+    }
+  };
+
   return (
     <KeyboardAvoidingView
       style={styles.container}
@@ -587,6 +670,7 @@ export default function ChatScreen() {
                     <TouchableOpacity
                       key={msg.id}
                       activeOpacity={0.9}
+                      onLongPress={() => handleCopy(msg.text)}
                       onPress={() => showToast(msg.text)}
                       style={[
                         styles.messageRow,
@@ -649,6 +733,31 @@ export default function ChatScreen() {
                           <ChatBrowserPreview
                             browserPreview={msg.browserPreview}
                           />
+                        ) : null}
+
+                        {!isUser && msg.clarification ? (
+                          <View style={styles.clarificationCard}>
+                            <Text style={styles.clarificationTitle}>
+                              {msg.clarification.question}
+                            </Text>
+                            {msg.clarification.choices.map((choice) => (
+                              <TouchableOpacity
+                                key={choice.value}
+                                style={styles.clarificationButton}
+                                onPress={() =>
+                                  handleClarificationChoice(
+                                    msg.id,
+                                    choice.value,
+                                  )
+                                }
+                                activeOpacity={0.85}
+                              >
+                                <Text style={styles.clarificationButtonText}>
+                                  {choice.label}
+                                </Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
                         ) : null}
 
                         {!isUser && msg.scheduleConfirmation ? (
@@ -1165,6 +1274,36 @@ const styles = StyleSheet.create({
     color: Colors.white,
     fontSize: 12.5,
     fontWeight: "700",
+  },
+  clarificationCard: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    backgroundColor: Colors.white,
+    gap: 8,
+  },
+  clarificationTitle: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: Colors.iconDark,
+    marginBottom: 4,
+  },
+  clarificationButton: {
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    backgroundColor: Colors.primarySubtle,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  clarificationButtonText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: Colors.iconDark,
   },
   scheduleCard: {
     marginTop: 12,

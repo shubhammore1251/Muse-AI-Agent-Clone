@@ -4,7 +4,10 @@ import {
   parseToolOutput,
 } from "@/lib/composioAgent";
 import { validateUserFromRequest } from "@/lib/composioBackend";
-import { parseScheduleIntentWithAgent } from "@/lib/scheduleIntentAgent";
+import {
+  classifyUserIntent,
+  parseScheduleIntentWithAgent,
+} from "@/lib/scheduleIntentAgent";
 import { closeBrowserSessions } from "@/services/tools/BrowserbaseSession";
 import { run } from "@openai/agents";
 
@@ -44,12 +47,52 @@ export async function POST(req: Request) {
             (message: any) =>
               message?.sender === "user" && typeof message?.text === "string",
           );
-        const scheduleConfirmation = latestUserMessage
-          ? await parseScheduleIntentWithAgent({
-              text: latestUserMessage.text,
-              timezone,
-            })
+
+        const latestClarification = [...messages]
+          .reverse()
+          .find(
+            (message: any) =>
+              message?.sender === "assistant" &&
+              message?.clarification &&
+              typeof message?.clarification?.originalRequest === "string",
+          );
+
+        const followUpIntent = latestUserMessage
+          ? classifyUserIntent(latestUserMessage.text)
           : null;
+        const resolvedRequestText =
+          latestClarification &&
+          followUpIntent &&
+          followUpIntent.intent === "clarification_follow_up"
+            ? latestClarification.clarification.originalRequest
+            : latestUserMessage?.text || "";
+
+        const intent = classifyUserIntent(resolvedRequestText);
+
+        if (intent.intent === "clarification_required") {
+          send({
+            type: "clarification",
+            output:
+              "How would you like me to handle this?\n\nDo it now\nSchedule it",
+            clarification: {
+              question: "How would you like me to handle this?",
+              originalRequest: resolvedRequestText,
+              choices: [
+                { label: "Do it now", value: "immediate" },
+                { label: "Schedule it", value: "recurring" },
+              ],
+            },
+          });
+          return;
+        }
+
+        const scheduleConfirmation =
+          intent.intent === "recurring_task"
+            ? await parseScheduleIntentWithAgent({
+                text: resolvedRequestText,
+                timezone,
+              })
+            : null;
 
         if (scheduleConfirmation) {
           send({

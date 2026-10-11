@@ -23,6 +23,14 @@ export interface ChatMessage {
     toolName: string;
     connectUrl: string;
   };
+  clarification?: {
+    question: string;
+    originalRequest: string;
+    choices: Array<{
+      label: string;
+      value: "immediate" | "recurring";
+    }>;
+  };
   scheduleConfirmation?: ScheduleConfirmation;
   scheduleStatus?: "pending" | "saving" | "confirmed" | "cancelled" | "failed";
   scheduledTaskId?: string;
