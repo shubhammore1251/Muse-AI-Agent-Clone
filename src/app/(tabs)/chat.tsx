@@ -52,6 +52,7 @@ export default function ChatScreen() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState("");
   const scrollViewRef = useRef<ScrollView>(null);
+  const shouldAutoScrollRef = useRef(true);
   const insets = useSafeAreaInsets();
   const [isSending, setIsSending] = useState(false);
   const [threadId, setThreadId] = useState<string | null>(null);
@@ -68,7 +69,7 @@ export default function ChatScreen() {
   }, [sideChatThreadId]);
 
   // Calculate header height offset for iOS KeyboardAvoidingView
-  const headerOffset = Platform.OS === "ios" ? insets.top + 98 : 0;
+  const headerOffset = Platform.OS === "web" ? 0 : insets.top + 98;
 
   useEffect(() => {
     const loadUser = async () => {
@@ -82,7 +83,9 @@ export default function ChatScreen() {
   }, []);
 
   useEffect(() => {
-    scrollViewRef.current?.scrollToEnd({ animated: true });
+    if (shouldAutoScrollRef.current) {
+      scrollViewRef.current?.scrollToEnd({ animated: true });
+    }
   }, [messages]);
 
   useEffect(() => {
@@ -125,9 +128,11 @@ export default function ChatScreen() {
     const showEvent =
       Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
     const sub = Keyboard.addListener(showEvent, () => {
-      setTimeout(() => {
-        scrollViewRef.current?.scrollToEnd({ animated: true });
-      }, 100);
+      if (shouldAutoScrollRef.current) {
+        setTimeout(() => {
+          scrollViewRef.current?.scrollToEnd({ animated: true });
+        }, 100);
+      }
     });
     return () => sub.remove();
   }, []);
@@ -136,6 +141,8 @@ export default function ChatScreen() {
     const text = inputText.trim();
     if (!text) return;
 
+    Keyboard.dismiss();
+    shouldAutoScrollRef.current = true;
     setIsSending(true);
 
     const userMsg: ChatMessage = {
@@ -427,7 +434,7 @@ export default function ChatScreen() {
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      behavior="padding"
       keyboardVerticalOffset={headerOffset}
     >
       <View style={styles.content}>
@@ -441,6 +448,14 @@ export default function ChatScreen() {
           }
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
+          onScroll={({ nativeEvent }) => {
+            const { contentOffset, contentSize, layoutMeasurement } =
+              nativeEvent;
+            shouldAutoScrollRef.current =
+              contentSize.height - layoutMeasurement.height - contentOffset.y <=
+              80;
+          }}
+          scrollEventThrottle={16}
         >
           <TouchableWithoutFeedback
             onPress={Keyboard.dismiss}
@@ -648,11 +663,6 @@ export default function ChatScreen() {
               style={styles.textInput}
               value={inputText}
               onChangeText={setInputText}
-              onFocus={() => {
-                setTimeout(() => {
-                  scrollViewRef.current?.scrollToEnd({ animated: true });
-                }, 100);
-              }}
               placeholder="Ask Cooper to read emails, send Slack msgs, or schedule meetings..."
               placeholderTextColor={Colors.iconMuted}
               returnKeyType="send"
