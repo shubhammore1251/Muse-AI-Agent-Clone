@@ -105,13 +105,16 @@ export default function SignInScreen() {
     if (sessionError) throw sessionError;
 
     if (sessionData.session) {
-      const { data: userData, error: userError } = await supabase
-        .from("users")
-        .upsert({
-          email: sessionData.session.user.email,
-          name: sessionData.session.user.user_metadata.name ?? "",
-        })
-        .select();
+      const user = sessionData.session.user;
+      const { error: userError } = await supabase.from("users").upsert(
+        {
+          id: user.id,
+          email: user.email,
+          name: user.user_metadata.name ?? "",
+        },
+        { onConflict: "id", ignoreDuplicates: true },
+      );
+      if (userError) throw userError;
       router.replace("/(tabs)/chat" as any);
     }
   };
