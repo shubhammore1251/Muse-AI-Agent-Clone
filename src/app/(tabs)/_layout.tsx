@@ -14,28 +14,32 @@
  */
 
 import {
-  AppHeader,
-  EditAgentModal,
-  SettingsMenuModal,
-  SidebarDrawer,
+    AppHeader,
+    EditAgentModal,
+    SettingsMenuModal,
+    SidebarDrawer,
 } from "@/components/common";
 import { Colors } from "@/constants/colors";
 import { showToast } from "@/context/ToastContext";
 import {
-  CheckmarkSquare02Icon,
-  Comment01Icon,
-  File01Icon,
-  Idea01Icon,
-  Settings02Icon,
+    CheckmarkSquare02Icon,
+    Comment01Icon,
+    File01Icon,
+    Idea01Icon,
+    Settings02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react-native";
 import { Tabs, useRouter } from "expo-router";
 import { useState } from "react";
 import { Platform, StyleSheet, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import {
+    SafeAreaView,
+    useSafeAreaInsets,
+} from "react-native-safe-area-context";
 
 export default function TabLayout() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
 
   // Agent mascot & profile state
   const [agentName, setAgentName] = useState("Cooper");
@@ -67,7 +71,13 @@ export default function TabLayout() {
             headerShown: false,
             tabBarShowLabel: false,
             tabBarHideOnKeyboard: true,
-            tabBarStyle: styles.tabBar,
+            tabBarStyle: [
+              styles.tabBar,
+              {
+                height: (Platform.OS === "ios" ? 62 : 60) + insets.bottom,
+                paddingBottom: insets.bottom,
+              },
+            ],
             tabBarItemStyle: styles.tabBarItem,
           }}
         >
@@ -242,8 +252,6 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.white,
     borderTopWidth: 1,
     borderTopColor: "#F0F0F2",
-    height: Platform.OS === "ios" ? 84 : 70,
-    paddingBottom: Platform.OS === "ios" ? 22 : 10,
     paddingTop: 8,
     paddingHorizontal: 12,
     elevation: 0,
