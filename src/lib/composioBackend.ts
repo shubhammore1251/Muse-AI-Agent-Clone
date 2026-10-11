@@ -480,7 +480,9 @@ async function syncStoredConnectionStatus(
   const directAccount = userAccounts.get(idToCheck);
   const account =
     directAccount ||
-    (tool ? findMatchingConnectedAccountForTool([...userAccounts.values()], tool) : null);
+    (tool
+      ? findMatchingConnectedAccountForTool([...userAccounts.values()], tool)
+      : null);
   if (!account) {
     if (accountId) {
       await save({ status: "revoked" });
