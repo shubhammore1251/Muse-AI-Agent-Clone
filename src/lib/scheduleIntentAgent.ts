@@ -170,53 +170,114 @@ export async function parseScheduleIntentWithAgent({
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    return null;
+    return createFallbackScheduleConfirmation(text, timezone);
   }
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model:
-        process.env.OPENAI_SCHEDULE_MODEL ||
-        process.env.OPENAI_AGENT_MODEL ||
-        "gpt-5-nano",
-      input: [
-        {
-          role: "system",
-          content: SCHEDULE_INTENT_PROMPT,
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            userMessage: text,
-            userTimezone: timezone || "UTC",
-          }),
-        },
-      ],
-    }),
-  });
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model:
+          process.env.OPENAI_SCHEDULE_MODEL ||
+          process.env.OPENAI_AGENT_MODEL ||
+          "gpt-5-nano",
+        input: [
+          {
+            role: "system",
+            content: SCHEDULE_INTENT_PROMPT,
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              userMessage: text,
+              userTimezone: timezone || "UTC",
+            }),
+          },
+        ],
+      }),
+    });
 
-  const raw = await response.text();
-  const data = raw ? JSON.parse(raw) : {};
+    const raw = await response.text();
+    const data = raw ? JSON.parse(raw) : {};
 
-  if (!response.ok) {
-    throw new Error(
-      `Schedule intent parser failed (${response.status}): ${raw}`,
+    if (response.ok) {
+      const parsed = parseJsonOutput(
+        extractOutputText(data),
+      ) as ScheduleIntentResult | null;
+      if (parsed?.intent === "schedule_task") {
+        return normalizeScheduleConfirmation(parsed, text, timezone);
+      }
+    }
+  } catch (error) {
+    console.warn(
+      "[scheduleIntentAgent] Proposal parser unavailable; using classified recurring request:",
+      error,
     );
   }
 
-  const parsed = parseJsonOutput(
-    extractOutputText(data),
-  ) as ScheduleIntentResult | null;
-  if (!parsed || parsed.intent !== "schedule_task") {
-    return null;
+  return createFallbackScheduleConfirmation(text, timezone);
+}
+
+function createFallbackScheduleConfirmation(
+  originalText: string,
+  timezone?: string,
+): ScheduleConfirmation {
+  const normalized = originalText.toLowerCase();
+  const weekly = /\b(weekly|weekdays?|weekends?|every\s+week)\b/.test(
+    normalized,
+  );
+  const weekday = normalized.match(
+    /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/,
+  )?.[1];
+  const time = inferScheduleTime(normalized);
+  const delivery = inferDeliveryFromPrompt(originalText) || "chat";
+  const taskPayload: Record<string, unknown> = {
+    prompt: originalText,
+    task: originalText,
+    useOpenAi: true,
+  };
+
+  enrichPayloadForBrowserbase(taskPayload, originalText);
+  enrichPayloadForDelivery(taskPayload, delivery, originalText);
+
+  return {
+    title: originalText.replace(/[.!?]+$/, "").slice(0, 100),
+    originalPrompt: originalText,
+    taskType: "generic_prompt",
+    taskPayload,
+    scheduleRule: {
+      frequency: weekly ? "weekly" : "daily",
+      time,
+      ...(weekly && weekday ? { weekday } : {}),
+    },
+    timezone: timezone || "UTC",
+    delivery,
+    summary: `Muse AI will run this ${weekly ? "weekly" : "daily"} at ${time} and deliver the result to ${formatDeliveryLabel(delivery)}.`,
+  };
+}
+
+function inferScheduleTime(normalized: string) {
+  const explicitTime = normalized.match(
+    /\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/,
+  );
+  if (explicitTime) {
+    let hour = Number(explicitTime[1]);
+    const minute = Number(explicitTime[2] || "0");
+    const meridiem = explicitTime[3];
+    if (meridiem === "pm" && hour < 12) hour += 12;
+    if (meridiem === "am" && hour === 12) hour = 0;
+    if (hour <= 23 && minute <= 59) {
+      return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+    }
   }
 
-  return normalizeScheduleConfirmation(parsed, text, timezone);
+  if (/\b(evening|afternoon)\b/.test(normalized)) return "18:00";
+  if (/\bnight\b/.test(normalized)) return "21:00";
+  return "08:00";
 }
 
 function classifyClarificationFollowUp(normalized: string) {

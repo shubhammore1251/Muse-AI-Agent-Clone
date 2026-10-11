@@ -3,8 +3,9 @@ import test from "node:test";
 
 import {
     classifyUserIntent,
+    parseScheduleIntentWithAgent,
     type UserIntentClassification,
-} from "./scheduleIntentAgent.ts";
+} from "./scheduleIntentAgent";
 
 const assertIntent = (
   text: string,
@@ -48,6 +49,63 @@ test("one-time calendar events on a future weekday are not recurring", () => {
 
 test("recurring inbox monitoring stays in recurring_task", () => {
   assertIntent("Check my inbox every morning.", "recurring_task");
+});
+
+test("the requested inbox task produces a confirmation proposal", async () => {
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+
+  try {
+    const text = "Check my inbox every morning and send me a summary.";
+    assertIntent(text, "recurring_task");
+
+    const proposal = await parseScheduleIntentWithAgent({
+      text,
+      timezone: "America/Los_Angeles",
+    });
+
+    assert.ok(proposal);
+    assert.equal(proposal.scheduleRule.frequency, "daily");
+    assert.equal(proposal.scheduleRule.time, "08:00");
+    assert.equal(proposal.delivery, "email");
+    assert.equal(proposal.originalPrompt, text);
+    assert.equal(proposal.taskPayload.task, text);
+  } finally {
+    if (previousApiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = previousApiKey;
+    }
+  }
+});
+
+test("the proposal model cannot veto an explicitly recurring request", async () => {
+  const previousApiKey = process.env.OPENAI_API_KEY;
+  const previousFetch = globalThis.fetch;
+  process.env.OPENAI_API_KEY = "test-key";
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ output_text: '{"intent":"normal_chat"}' }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+
+  try {
+    const proposal = await parseScheduleIntentWithAgent({
+      text: "Check my inbox every morning and send me a summary.",
+      timezone: "America/Los_Angeles",
+    });
+
+    assert.ok(proposal);
+    assert.equal(proposal.scheduleRule.frequency, "daily");
+    assert.equal(proposal.delivery, "email");
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousApiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = previousApiKey;
+    }
+  }
 });
 
 test("ambiguous requests require clarification", () => {

@@ -80,6 +80,7 @@ export default function ChatScreen() {
   const [userId, setUserId] = useState<string | null>(null);
   const historyLoadIdRef = useRef(0);
   const activeAgentRequestIdRef = useRef(0);
+  const confirmingScheduleIdsRef = useRef(new Set<string>());
   const isSendingRef = useRef(false);
   const threadIdRef = useRef(threadId);
   threadIdRef.current = threadId;
@@ -487,13 +488,20 @@ export default function ChatScreen() {
 
   const handleConfirmSchedule = async (messageId: string) => {
     const message = messages.find((msg) => msg.id === messageId);
-    if (!message?.scheduleConfirmation) return;
+    if (
+      !message?.scheduleConfirmation ||
+      message.scheduleStatus !== "pending" ||
+      confirmingScheduleIdsRef.current.has(messageId)
+    ) {
+      return;
+    }
 
     if (!userId) {
       showToast("Please sign in before creating a schedule.");
       return;
     }
 
+    confirmingScheduleIdsRef.current.add(messageId);
     setMessages((prev) =>
       prev.map((msg) =>
         msg.id === messageId
@@ -524,13 +532,20 @@ export default function ChatScreen() {
         ),
       );
 
-      await updateMessage(messageId, "Scheduled.", {
-        scheduleConfirmation: message.scheduleConfirmation,
-        scheduleStatus: "confirmed",
-        scheduledTaskId: task.id,
-      });
-
       showToast("Schedule created");
+
+      try {
+        await updateMessage(messageId, "Scheduled.", {
+          scheduleConfirmation: message.scheduleConfirmation,
+          scheduleStatus: "confirmed",
+          scheduledTaskId: task.id,
+        });
+      } catch (error) {
+        console.error(
+          "Failed to persist schedule confirmation metadata:",
+          error,
+        );
+      }
     } catch (error) {
       console.error("Failed to create schedule:", error);
       const errorMessage = getScheduleCreateErrorMessage(error);
@@ -548,11 +563,19 @@ export default function ChatScreen() {
       );
 
       showToast(errorMessage);
+    } finally {
+      confirmingScheduleIdsRef.current.delete(messageId);
     }
   };
 
   const handleCancelSchedule = (messageId: string) => {
     const message = messages.find((msg) => msg.id === messageId);
+    if (
+      !message?.scheduleConfirmation ||
+      message.scheduleStatus !== "pending"
+    ) {
+      return;
+    }
 
     setMessages((prev) =>
       prev.map((msg) =>
@@ -574,7 +597,12 @@ export default function ChatScreen() {
 
   const handleEditSchedule = (messageId: string) => {
     const message = messages.find((msg) => msg.id === messageId);
-    if (!message?.scheduleConfirmation) return;
+    if (
+      !message?.scheduleConfirmation ||
+      message.scheduleStatus !== "pending"
+    ) {
+      return;
+    }
 
     setInputText(message.scheduleConfirmation.originalPrompt);
     handleCancelSchedule(messageId);
@@ -760,7 +788,9 @@ export default function ChatScreen() {
                           </View>
                         ) : null}
 
-                        {!isUser && msg.scheduleConfirmation ? (
+                        {!isUser &&
+                        msg.scheduleConfirmation &&
+                        msg.scheduleStatus !== "cancelled" ? (
                           <View style={styles.scheduleCard}>
                             <Text style={styles.scheduleTitle}>
                               Schedule this task?
