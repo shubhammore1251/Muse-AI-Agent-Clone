@@ -129,6 +129,15 @@ export function classifyUserIntent(text: string): UserIntentClassification {
     };
   }
 
+  if (isLiveResultsRequest(normalized)) {
+    return {
+      intent: "browser_research",
+      originalText: trimmed,
+      reason:
+        "This request needs current results from a live information source.",
+    };
+  }
+
   if (isImmediateActionRequest(normalized)) {
     return {
       intent: "immediate_action",
@@ -337,6 +346,12 @@ function isBrowserResearchRequest(normalized: string) {
     );
 
   return travelResearch || webSearch || liveResearch || productFacts;
+}
+
+function isLiveResultsRequest(normalized: string) {
+  return /\b(find|look up|check|get|show|tell me|what(?:'s| is))\b.*\b(live score|score|match result|sports result|showtimes?|ticket prices?|flight fares?)\b/i.test(
+    normalized,
+  );
 }
 
 function isImmediateActionRequest(normalized: string) {

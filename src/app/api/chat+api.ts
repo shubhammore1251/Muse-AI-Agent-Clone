@@ -7,6 +7,11 @@ import {
   summarizeArgumentKeys,
 } from "@/lib/agentLogger";
 import {
+  getRequiredBrowserResearchSources,
+  hasSufficientBrowserResearchEvidence,
+  planBrowserResearch,
+} from "@/lib/browserResearchPlanner";
+import {
   createCooperAgentForUser,
   mapMessages,
   parseToolOutput,
@@ -17,7 +22,7 @@ import {
   parseScheduleIntentWithAgent,
 } from "@/lib/scheduleIntentAgent";
 import { closeBrowserSessions } from "@/services/tools/BrowserbaseSession";
-import { run } from "@openai/agents";
+import { AgentInputItem, run } from "@openai/agents";
 
 export async function POST(req: Request) {
   const executionId = createExecutionId();
@@ -101,12 +106,16 @@ export async function POST(req: Request) {
         const followUpIntent = latestUserMessage
           ? classifyUserIntent(latestUserMessage.text)
           : null;
+        const browserFollowUp = resolveBrowserResearchFollowUp(
+          messages,
+          latestUserMessage,
+        );
         const resolvedRequestText =
           latestClarification &&
           followUpIntent &&
           followUpIntent.intent === "clarification_follow_up"
             ? latestClarification.clarification.originalRequest
-            : latestUserMessage?.text || "";
+            : browserFollowUp?.request || latestUserMessage?.text || "";
 
         const intent = classifyUserIntent(resolvedRequestText);
         logAgentEvent("Request received", executionId, {
@@ -163,178 +172,317 @@ export async function POST(req: Request) {
           return;
         }
 
+        let browserPlan;
+        if (intent.intent === "browser_research") {
+          browserPlan = await planBrowserResearch({
+            request: resolvedRequestText,
+            timezone,
+            conversationContext: browserFollowUp?.conversationContext,
+          });
+          logAgentEvent("Execution plan created", executionId, {
+            action: "browser_research",
+            goal: safeRequestSummary(browserPlan.goal),
+            entities: browserPlan.entities.length,
+            constraints: browserPlan.constraints
+              .map(({ name }) => name)
+              .join(","),
+            sources: browserPlan.sources
+              .map(({ url }) => safeDomain(url))
+              .join(","),
+            search_queries: browserPlan.searchQueries.length,
+            comparison_criteria: browserPlan.comparisonCriteria.length,
+          });
+
+          if (browserPlan.clarificationQuestion) {
+            logAgentEvent("Clarification requested", executionId, {
+              reason: "essential_research_constraint_missing",
+              missing_information: browserPlan.missingInformation.length,
+            });
+            send({
+              type: "final",
+              output: `Before I research, I need one detail: ${browserPlan.clarificationQuestion}`,
+            });
+            return;
+          }
+        }
+
         logAgentEvent("Execution path selected", executionId, {
           action: "cooper_agent_tool_loop",
+          plan: browserPlan ? "browser_research" : "none",
         });
         const agent = await createCooperAgentForUser(
           activeUserId || "",
           executionId,
+          browserPlan,
         );
-        const result = await run(agent, mapMessages(messages), {
+        let result = await run(agent, mapMessages(messages), {
           stream: true,
           maxTurns: 30,
         });
+        let output = "";
+        let continuationAttempt = 0;
+        const browserEvidenceDomains = new Set<string>();
+        let usefulBrowserReads = 0;
 
-        for await (const event of result) {
-          if (event.type !== "run_item_stream_event") continue;
+        while (true) {
+          for await (const event of result) {
+            if (event.type !== "run_item_stream_event") continue;
 
-          if (event.name === "tool_search_called") {
-            const rawItem = (event.item as any)?.rawItem;
-            logAgentEvent("Tool search started", executionId, {
-              argument_keys: summarizeArgumentKeys(rawItem?.arguments),
-            });
-            continue;
-          }
+            if (event.name === "tool_search_called") {
+              const rawItem = (event.item as any)?.rawItem;
+              logAgentEvent("Tool search started", executionId, {
+                argument_keys: summarizeArgumentKeys(rawItem?.arguments),
+              });
+              continue;
+            }
 
-          if (event.name === "tool_search_output_created") {
-            const rawItem = (event.item as any)?.rawItem;
-            logAgentEvent("Tool search completed", executionId, {
-              available_tools: Array.isArray(rawItem?.tools)
-                ? rawItem.tools.length
-                : undefined,
-            });
-            continue;
-          }
+            if (event.name === "tool_search_output_created") {
+              const rawItem = (event.item as any)?.rawItem;
+              logAgentEvent("Tool search completed", executionId, {
+                available_tools: Array.isArray(rawItem?.tools)
+                  ? rawItem.tools.length
+                  : undefined,
+              });
+              continue;
+            }
 
-          if (event.name === "tool_called") {
-            flushToolResults(true);
-            const rawItem = (event.item as any)?.rawItem;
-            const toolName = rawItem?.name || "unknown_tool";
-            const toolCallId =
-              rawItem?.callId || rawItem?.id || `${toolName}:${toolSequence}`;
-            const argumentKeys = summarizeArgumentKeys(rawItem?.arguments);
-            toolSequence += 1;
-            toolCallCount += 1;
-            activeToolCalls.set(String(toolCallId), {
-              name: String(toolName),
-              startedAt: Date.now(),
-            });
-            logAgentEvent("Tool selected", executionId, {
-              sequence: toolSequence,
-              integration: getToolIntegration(toolName),
-              tool: toolName,
-              argument_keys: argumentKeys,
-            });
-            logAgentEvent("Tool execution started", executionId, {
-              tool: toolName,
-            });
+            if (event.name === "tool_called") {
+              flushToolResults(true);
+              const rawItem = (event.item as any)?.rawItem;
+              const toolName = rawItem?.name || "unknown_tool";
+              const toolCallId =
+                rawItem?.callId || rawItem?.id || `${toolName}:${toolSequence}`;
+              const argumentKeys = summarizeArgumentKeys(rawItem?.arguments);
+              toolSequence += 1;
+              toolCallCount += 1;
+              activeToolCalls.set(String(toolCallId), {
+                name: String(toolName),
+                startedAt: Date.now(),
+              });
+              logAgentEvent("Tool selected", executionId, {
+                sequence: toolSequence,
+                integration: getToolIntegration(toolName),
+                tool: toolName,
+                argument_keys: argumentKeys,
+              });
+              logAgentEvent("Tool execution started", executionId, {
+                tool: toolName,
+              });
 
-            if (/^(create_browser_session|browser_navigate)$/i.test(toolName)) {
-              let toolArguments: any = rawItem?.arguments;
-              if (typeof toolArguments === "string") {
-                try {
-                  toolArguments = JSON.parse(toolArguments);
-                } catch {
-                  toolArguments = {};
+              if (
+                /^(create_browser_session|browser_navigate)$/i.test(toolName)
+              ) {
+                let toolArguments: any = rawItem?.arguments;
+                if (typeof toolArguments === "string") {
+                  try {
+                    toolArguments = JSON.parse(toolArguments);
+                  } catch {
+                    toolArguments = {};
+                  }
                 }
+                logAgentEvent("Browser navigation started", executionId, {
+                  destination: safeDomain(
+                    toolArguments?.startUrl || toolArguments?.url,
+                  ),
+                });
               }
-              logAgentEvent("Browser navigation started", executionId, {
-                destination: safeDomain(
-                  toolArguments?.startUrl || toolArguments?.url,
-                ),
+
+              send({
+                type: "activity",
+                activity: getToolActivityStage(toolName),
+              });
+              continue;
+            }
+
+            if (event.name === "message_output_created") {
+              const phase = (event.item as any)?.rawItem?.phase;
+              if (phase !== "commentary") {
+                send({ type: "activity", activity: "preparing_response" });
+              }
+              continue;
+            }
+
+            if (event.name !== "tool_output") continue;
+
+            send({ type: "activity", activity: "processing_results" });
+
+            const outputItem = event.item as any;
+            const output = parseToolOutput(outputItem.output);
+            const rawOutputItem = outputItem.rawItem;
+            const outputName = String(rawOutputItem?.name || "unknown_tool");
+            const outputCallId = String(
+              rawOutputItem?.callId || rawOutputItem?.id || "",
+            );
+            const activeCall = outputCallId
+              ? activeToolCalls.get(outputCallId)
+              : [...activeToolCalls.values()].find(
+                  (call) => call.name === outputName,
+                );
+            if (activeCall) {
+              if (outputCallId) activeToolCalls.delete(outputCallId);
+              else {
+                const matchingKey = [...activeToolCalls.entries()].find(
+                  ([, call]) => call === activeCall,
+                )?.[0];
+                if (matchingKey) activeToolCalls.delete(matchingKey);
+              }
+
+              const outputStatus = String(output?.status || "").toLowerCase();
+              const outputFailed =
+                rawOutputItem?.status === "incomplete" ||
+                output?.isError === true ||
+                [
+                  "failed",
+                  "failure",
+                  "error",
+                  "login_required",
+                  "not_verified",
+                  "no_data",
+                ].includes(outputStatus);
+              pendingToolResults.push({
+                name: activeCall.name,
+                durationMs: Date.now() - activeCall.startedAt,
+                status: outputFailed ? "failed" : "success",
+                resultStatus: outputStatus || undefined,
+                error: outputFailed
+                  ? safeErrorMessage(
+                      output?.message ||
+                        output?.error ||
+                        "Tool returned an error",
+                    )
+                  : undefined,
               });
             }
 
-            send({
-              type: "activity",
-              activity: getToolActivityStage(toolName),
-            });
-            continue;
-          }
-
-          if (event.name === "message_output_created") {
-            const phase = (event.item as any)?.rawItem?.phase;
-            if (phase !== "commentary") {
-              send({ type: "activity", activity: "preparing_response" });
-            }
-            continue;
-          }
-
-          if (event.name !== "tool_output") continue;
-
-          send({ type: "activity", activity: "processing_results" });
-
-          const outputItem = event.item as any;
-          const output = parseToolOutput(outputItem.output);
-          const rawOutputItem = outputItem.rawItem;
-          const outputName = String(rawOutputItem?.name || "unknown_tool");
-          const outputCallId = String(
-            rawOutputItem?.callId || rawOutputItem?.id || "",
-          );
-          const activeCall = outputCallId
-            ? activeToolCalls.get(outputCallId)
-            : [...activeToolCalls.values()].find(
-                (call) => call.name === outputName,
-              );
-          if (activeCall) {
-            if (outputCallId) activeToolCalls.delete(outputCallId);
-            else {
-              const matchingKey = [...activeToolCalls.entries()].find(
-                ([, call]) => call === activeCall,
-              )?.[0];
-              if (matchingKey) activeToolCalls.delete(matchingKey);
+            if (
+              /^(create_browser_session|browser_navigate)$/i.test(outputName)
+            ) {
+              logAgentEvent("Browser navigation completed", executionId, {
+                destination: safeDomain(output?.currentUrl),
+                status: output?.status || "completed",
+              });
+            } else if (/^browser_read$/i.test(outputName)) {
+              logAgentEvent("Browser page inspected", executionId, {
+                page: safeDomain(output?.currentUrl),
+                status: output?.status || "completed",
+              });
+              if (
+                output?.status === "completed" &&
+                typeof output.result === "string" &&
+                output.result.trim().length >= 12
+              ) {
+                usefulBrowserReads += 1;
+                const domain = safeDomain(output.currentUrl);
+                if (domain !== "unknown") browserEvidenceDomains.add(domain);
+              }
+            } else if (/^browser_action$/i.test(outputName)) {
+              logAgentEvent("Browser action verified", executionId, {
+                page: safeDomain(output?.currentUrl),
+                observed: output?.actionObserved === true,
+                status: output?.status || "unknown",
+              });
             }
 
-            const outputStatus = String(output?.status || "").toLowerCase();
-            const outputFailed =
-              rawOutputItem?.status === "incomplete" ||
-              output?.isError === true ||
-              ["failed", "failure", "error", "login_required"].includes(
-                outputStatus,
-              );
-            pendingToolResults.push({
-              name: activeCall.name,
-              durationMs: Date.now() - activeCall.startedAt,
-              status: outputFailed ? "failed" : "success",
-              resultStatus: outputStatus || undefined,
-              error: outputFailed
-                ? safeErrorMessage(
-                    output?.message ||
-                      output?.error ||
-                      "Tool returned an error",
-                  )
-                : undefined,
-            });
+            if (
+              output?.type === "browser_session" &&
+              typeof output.sessionId === "string"
+            ) {
+              browserSessionIds.add(output.sessionId);
+              send({
+                type: "browser",
+                browser: output,
+              });
+            }
+
+            if (
+              output?.type === "close_browser_result" &&
+              typeof output.sessionId === "string"
+            ) {
+              browserSessionIds.delete(output.sessionId);
+            }
+
+            if (output?.status === "login_required") {
+              loginRequired = true;
+            }
           }
 
-          if (/^(create_browser_session|browser_navigate)$/i.test(outputName)) {
-            logAgentEvent("Browser navigation completed", executionId, {
-              destination: safeDomain(output?.currentUrl),
-              status: output?.status || "completed",
-            });
-          } else if (/^browser_read$/i.test(outputName)) {
-            logAgentEvent("Browser page inspected", executionId, {
-              page: safeDomain(output?.currentUrl),
-              status: output?.status || "completed",
-            });
-          }
+          await result.completed;
+          output = result.finalOutput ?? "";
 
-          if (
-            output?.type === "browser_session" &&
-            typeof output.sessionId === "string"
-          ) {
-            browserSessionIds.add(output.sessionId);
-            send({
-              type: "browser",
-              browser: output,
-            });
-          }
+          const requiredSources = browserPlan
+            ? getRequiredBrowserResearchSources(browserPlan)
+            : 0;
+          const hasEnoughBrowserEvidence =
+            !browserPlan ||
+            hasSufficientBrowserResearchEvidence(
+              browserPlan,
+              usefulBrowserReads,
+              browserEvidenceDomains,
+            );
 
           if (
-            output?.type === "close_browser_result" &&
-            typeof output.sessionId === "string"
+            !browserPlan ||
+            hasEnoughBrowserEvidence ||
+            loginRequired ||
+            continuationAttempt >= 2
           ) {
-            browserSessionIds.delete(output.sessionId);
+            break;
           }
 
-          if (output?.status === "login_required") {
-            loginRequired = true;
+          continuationAttempt += 1;
+          logAgentEvent("Research continuation required", executionId, {
+            attempt: continuationAttempt,
+            useful_page_reads: usefulBrowserReads,
+            distinct_sources: browserEvidenceDomains.size,
+            required_sources: requiredSources,
+          });
+          send({ type: "activity", activity: "browsing_web" });
+
+          const continuationMessages: AgentInputItem[] = [
+            ...mapMessages(messages),
+            {
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: output }],
+            } as AgentInputItem,
+            {
+              role: "user",
+              content:
+                `Continue the existing research plan; do not restart with the full request as one search query. ` +
+                `Useful page reads so far: ${usefulBrowserReads}. ` +
+                `Distinct source domains inspected: ${[...browserEvidenceDomains].filter((domain) => domain !== "unknown").join(",") || "none"}. ` +
+                `Required distinct sources for this plan: ${requiredSources}. ` +
+                `${browserSessionIds.size > 0 ? `Existing Browserbase session IDs: ${[...browserSessionIds].join(",")}. Do not create another session; reuse one of these.` : "No Browserbase session exists yet; create one for the next planned source."} ` +
+                `Inspect prior results, then choose a focused next query or another planned source. Verify every action with browser_read. ` +
+                `Research plan: ${JSON.stringify(browserPlan)}. Do not claim completion unless observed evidence satisfies its completion criteria.`,
+            },
+          ];
+          result = await run(agent, continuationMessages, {
+            stream: true,
+            maxTurns: 20,
+          });
+        }
+
+        if (browserPlan) {
+          const requiredSources =
+            getRequiredBrowserResearchSources(browserPlan);
+          if (
+            !loginRequired &&
+            !hasSufficientBrowserResearchEvidence(
+              browserPlan,
+              usefulBrowserReads,
+              browserEvidenceDomains,
+            )
+          ) {
+            logAgentEvent("Research evidence incomplete", executionId, {
+              useful_page_reads: usefulBrowserReads,
+              distinct_sources: browserEvidenceDomains.size,
+              required_sources: requiredSources,
+            });
+            output = `${output}${output ? "\n\n" : ""}Research limitation: I could not verify enough useful page evidence to complete this research confidently.`;
           }
         }
 
-        await result.completed;
-
-        const output = result.finalOutput ?? "";
         flushToolResults(false);
         if (toolCallCount === 0) {
           logAgentEvent("No tool selected", executionId, {
@@ -406,6 +554,55 @@ function getToolIntegration(toolName: unknown) {
   if (/notion/.test(normalized)) return "notion";
   if (/teams/.test(normalized)) return "microsoftteams";
   return normalized.split(/[_-]/)[0] || "connected_tool";
+}
+
+function resolveBrowserResearchFollowUp(
+  messages: any[],
+  latestUserMessage: any,
+): {
+  request: string;
+  conversationContext: Array<{ role: string; text: string }>;
+} | null {
+  if (!latestUserMessage?.text || !Array.isArray(messages)) return null;
+
+  const latestUserIndex = messages.lastIndexOf(latestUserMessage);
+  if (latestUserIndex <= 1) return null;
+
+  let assistantIndex = latestUserIndex - 1;
+  while (assistantIndex >= 0 && messages[assistantIndex]?.sender !== "agent") {
+    assistantIndex -= 1;
+  }
+  const assistantMessage = messages[assistantIndex];
+  if (
+    typeof assistantMessage?.text !== "string" ||
+    !assistantMessage.text.startsWith("Before I research, I need one detail:")
+  ) {
+    return null;
+  }
+
+  let originalRequestIndex = assistantIndex - 1;
+  while (
+    originalRequestIndex >= 0 &&
+    messages[originalRequestIndex]?.sender !== "user"
+  ) {
+    originalRequestIndex -= 1;
+  }
+  const originalRequest = messages[originalRequestIndex]?.text;
+  if (
+    typeof originalRequest !== "string" ||
+    classifyUserIntent(originalRequest).intent !== "browser_research"
+  ) {
+    return null;
+  }
+
+  return {
+    request: `${originalRequest}\n\nAdditional detail from the user: ${latestUserMessage.text}`,
+    conversationContext: [
+      { role: "user", text: originalRequest },
+      { role: "assistant", text: assistantMessage.text },
+      { role: "user", text: latestUserMessage.text },
+    ],
+  };
 }
 
 function getToolActivityStage(toolName: unknown) {

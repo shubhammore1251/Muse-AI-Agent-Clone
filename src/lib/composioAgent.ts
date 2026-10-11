@@ -3,6 +3,10 @@ import {
   logAgentEvent,
   safeErrorMessage,
 } from "@/lib/agentLogger";
+import {
+  BrowserResearchPlan,
+  formatBrowserPlanForAgent,
+} from "@/lib/browserResearchPlanner";
 import { getSupabaseAdminClient } from "@/lib/composioBackend";
 import {
   browserActionTool,
@@ -142,6 +146,7 @@ async function getUserComposioSession(userId: string, executionId: string) {
 export async function createCooperAgentForUser(
   userId: string,
   executionId = createExecutionId(),
+  browserPlan?: BrowserResearchPlan,
 ) {
   let composioTools: any[];
   try {
@@ -159,6 +164,11 @@ export async function createCooperAgentForUser(
     browser_tools: 5,
   });
 
+  const browserPlanInstructions = browserPlan
+    ? `\n\nBROWSER RESEARCH PLAN (execute this plan; it is not a user-facing answer):\n${formatBrowserPlanForAgent(browserPlan)}\n\n` +
+      "Use the plan's sources and focused searchQueries instead of searching the whole original request verbatim. Start one Browserbase session on the first relevant source, then use browser_read to inspect it. Execute focused queries using the site's search/filter controls or a suitable search URL; do not paste the whole request as one query. When the plan selects multiple sources or compares options, gather observed page evidence from at least two distinct sources where accessible. Use one browser_action per action and inspect the resulting page with browser_read before proceeding. If a page is loading, wait briefly using a browser action and inspect again. Dismiss only nonessential cookie-consent banners when needed; do not accept signups or account terms. Verify that interactions changed the page; if not, inspect and try one reasonable alternate action or source. Collect only facts observed on pages, retain actual source URLs for citations, and compare using the listed criteria when applicable. Continue until the completionCriteria are met or the remaining limitations block progress. Do not invent results or claim a source was checked when it was not. Never log in, bypass CAPTCHA, commit a booking, or pay. If evidence is unavailable, say so and explain which source or constraint could not be verified."
+    : "";
+
   return new Agent({
     name: "Cooper",
     instructions:
@@ -172,7 +182,8 @@ export async function createCooperAgentForUser(
       "Before creating, updating, sending, deleting, or otherwise changing data, ask for confirmation and wait for the user. " +
       "For read-only requests, use tools directly and return a clean, structured answer instead of raw JSON. " +
       "For normal questions, writing, brainstorming, explanations, or content the user already provided, answer directly without using tools. " +
-      "Never expose Browserbase session IDs, websocket URLs, debugger URLs, preview URLs, API keys, or internal tool details.",
+      "Never expose Browserbase session IDs, websocket URLs, debugger URLs, preview URLs, API keys, or internal tool details." +
+      browserPlanInstructions,
     model: process.env.OPENAI_AGENT_MODEL || "gpt-5-nano",
     tools: [
       ...composioTools,

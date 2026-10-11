@@ -1,16 +1,19 @@
+import { safeErrorMessage } from "@/lib/agentLogger";
 import { createBrowser, GetBrowserbase } from "@/lib/browserbase";
 import { tool } from "@openai/agents";
 import { z } from "zod";
 
 import {
-    deleteBrowserSession,
-    getBrowserSession,
-    saveBrowserSession,
+  deleteBrowserSession,
+  getBrowserSession,
+  saveBrowserSession,
 } from "./browserSessionStore";
 
 const loginRequiredSchema = z.object({
   loginRequired: z.boolean(),
   message: z.string(),
+  actionObserved: z.boolean(),
+  pageState: z.string(),
 });
 
 const readResultSchema = z.object({
@@ -47,37 +50,60 @@ unless the user only asked to open the page.
   }),
 
   execute: async ({ reason, startUrl }) => {
-    const { browser, stagehand } = await createBrowser();
+    let resources: Awaited<ReturnType<typeof createBrowser>> | undefined;
+    try {
+      resources = await createBrowser();
+      const { browser, stagehand } = resources;
 
-    const page = await getActivePageOrCreate(browser);
-    const navigation = await tryNavigateToAny(
-      page,
-      getStartUrlCandidates(startUrl),
-    );
+      const page = await getActivePageOrCreate(browser);
+      const navigation = await tryNavigateToAny(
+        page,
+        getStartUrlCandidates(startUrl),
+      );
 
-    const sessionId = browser.sessionId ?? "";
+      const sessionId = browser.sessionId ?? "";
 
-    if (!sessionId) {
-      throw new Error("Browserbase did not return a session ID.");
+      if (!sessionId) {
+        throw new Error("Browserbase did not return a session ID.");
+      }
+
+      saveBrowserSession(sessionId, {
+        browser,
+        stagehand,
+      });
+
+      const previewUrl = await getPreviewUrl(sessionId);
+      const currentUrl = await page.url();
+
+      return {
+        type: "browser_session",
+        status: "ready",
+        sessionId,
+        previewUrl,
+        currentUrl,
+        attemptedUrls: navigation.attemptedUrls,
+        reason,
+      };
+    } catch (error) {
+      const sessionId = resources?.browser.sessionId;
+      if (sessionId && getBrowserSession(sessionId)) {
+        await closeBrowserSession(sessionId).catch(() => undefined);
+      } else if (resources) {
+        await Promise.allSettled([
+          resources.stagehand.close(),
+          resources.browser.close(),
+        ]);
+        if (sessionId) {
+          await releaseBrowserbaseSession(sessionId).catch(() => undefined);
+        }
+      }
+      return {
+        type: "browser_session",
+        status: "failed",
+        error: safeErrorMessage(error),
+        reason,
+      };
     }
-
-    saveBrowserSession(sessionId, {
-      browser,
-      stagehand,
-    });
-
-    const previewUrl = await getPreviewUrl(sessionId);
-    const currentUrl = await page.url();
-
-    return {
-      type: "browser_session",
-      status: "ready",
-      sessionId,
-      previewUrl,
-      currentUrl,
-      attemptedUrls: navigation.attemptedUrls,
-      reason,
-    };
   },
 });
 
@@ -101,21 +127,34 @@ information. Try a direct URL, an alternate page, or a search URL before failing
   }),
 
   execute: async ({ sessionId, url, reason }) => {
-    const session = getRequiredBrowserSession(sessionId);
-    const page = await getActivePageOrCreate(session.browser);
-    const navigation = await tryNavigateToAny(page, getStartUrlCandidates(url));
-    const previewUrl = await getPreviewUrl(sessionId);
-    const currentUrl = await page.url();
+    try {
+      const session = getRequiredBrowserSession(sessionId);
+      const page = await getActivePageOrCreate(session.browser);
+      const navigation = await tryNavigateToAny(
+        page,
+        getStartUrlCandidates(url),
+      );
+      const previewUrl = await getPreviewUrl(sessionId);
+      const currentUrl = await page.url();
 
-    return {
-      type: "browser_navigation_result",
-      status: "completed",
-      sessionId,
-      previewUrl,
-      currentUrl,
-      attemptedUrls: navigation.attemptedUrls,
-      reason,
-    };
+      return {
+        type: "browser_navigation_result",
+        status: "completed",
+        sessionId,
+        previewUrl,
+        currentUrl,
+        attemptedUrls: navigation.attemptedUrls,
+        reason,
+      };
+    } catch (error) {
+      return {
+        type: "browser_navigation_result",
+        status: "failed",
+        sessionId,
+        error: safeErrorMessage(error),
+        reason,
+      };
+    }
   },
 });
 
@@ -139,33 +178,50 @@ links. Do not combine multiple actions into one instruction.
   }),
 
   execute: async ({ sessionId, instruction }) => {
-    const session = getRequiredBrowserSession(sessionId);
+    try {
+      const session = getRequiredBrowserSession(sessionId);
 
-    await session.stagehand.act(instruction);
+      await session.stagehand.act(instruction);
 
-    const page = await getActivePageOrCreate(session.browser);
-    const currentUrl = await page.url();
-    const previewUrl = await getPreviewUrl(sessionId);
-    const loginCheck = await checkLoginRequired(session.stagehand);
+      const page = await getActivePageOrCreate(session.browser);
+      const currentUrl = await page.url();
+      const previewUrl = await getPreviewUrl(sessionId);
+      const pageCheck = await checkLoginRequired(
+        session.stagehand,
+        instruction,
+      );
 
-    if (loginCheck.loginRequired) {
+      if (pageCheck.loginRequired) {
+        return {
+          type: "browser_action_result",
+          status: "login_required",
+          actionObserved: false,
+          pageState: pageCheck.pageState,
+          sessionId,
+          previewUrl,
+          currentUrl,
+          message: pageCheck.message,
+        };
+      }
+
       return {
         type: "browser_action_result",
-        status: "login_required",
+        status: pageCheck.actionObserved ? "completed" : "not_verified",
+        actionObserved: pageCheck.actionObserved,
+        pageState: pageCheck.pageState,
         sessionId,
         previewUrl,
         currentUrl,
-        message: loginCheck.message,
+      };
+    } catch (error) {
+      return {
+        type: "browser_action_result",
+        status: "failed",
+        actionObserved: false,
+        sessionId,
+        error: safeErrorMessage(error),
       };
     }
-
-    return {
-      type: "browser_action_result",
-      status: "completed",
-      sessionId,
-      previewUrl,
-      currentUrl,
-    };
   },
 });
 
@@ -187,28 +243,38 @@ the live browser.
   }),
 
   execute: async ({ sessionId, instruction }) => {
-    const session = getRequiredBrowserSession(sessionId);
+    try {
+      const session = getRequiredBrowserSession(sessionId);
 
-    const extraction = await session.stagehand.extract(
-      instruction,
-      readResultSchema as any,
-    );
+      const extraction = await session.stagehand.extract(
+        instruction,
+        readResultSchema as any,
+      );
 
-    const page = await getActivePageOrCreate(session.browser);
-    const currentUrl = await page.url();
-    const result = (extraction.data as z.infer<typeof readResultSchema>).result;
-    const hasUsefulResult = isUsefulReadResult(result);
+      const page = await getActivePageOrCreate(session.browser);
+      const currentUrl = await page.url();
+      const result = (extraction.data as z.infer<typeof readResultSchema>)
+        .result;
+      const hasUsefulResult = isUsefulReadResult(result);
 
-    return {
-      type: "browser_read_result",
-      status: hasUsefulResult ? "completed" : "no_data",
-      sessionId,
-      currentUrl,
-      result,
-      message: hasUsefulResult
-        ? undefined
-        : "No useful data was extracted from the current page. Try another action, alternate URL, search result, or browser_navigate before answering.",
-    };
+      return {
+        type: "browser_read_result",
+        status: hasUsefulResult ? "completed" : "no_data",
+        sessionId,
+        currentUrl,
+        result,
+        message: hasUsefulResult
+          ? undefined
+          : "No useful data was extracted from the current page. Try another action, alternate URL, search result, or browser_navigate before answering.",
+      };
+    } catch (error) {
+      return {
+        type: "browser_read_result",
+        status: "failed",
+        sessionId,
+        error: safeErrorMessage(error),
+      };
+    }
   },
 });
 
@@ -271,13 +337,17 @@ export async function closeBrowserSessions(sessionIds: Iterable<string>) {
 
 export async function checkLoginRequired(
   stagehand: ReturnType<typeof getRequiredBrowserSession>["stagehand"],
+  actionInstruction = "",
 ) {
   const extraction = await stagehand.extract(
-    `Determine whether authentication is actually blocking progress on the current page.
+    `Inspect the current page after the preceding browser action.
 
 Return loginRequired true only when login is required to continue, a credential
 page blocks progress, or an authentication challenge blocks the workflow.
-Do not return true merely because the page contains a Sign In, Log In, or Account button.`,
+Do not return true merely because the page contains a Sign In, Log In, or Account button.
+Set actionObserved true only if the visible page state confirms this action occurred:
+${actionInstruction || "No specific action was supplied."}
+Return a short pageState description without copying private page content.`,
     loginRequiredSchema as any,
   );
 
@@ -308,7 +378,7 @@ async function getPreviewUrl(sessionId: string) {
   return debug.debuggerFullscreenUrl ?? debug.debuggerUrl;
 }
 
-async function tryNavigateToAny(
+export async function tryNavigateToAny(
   page: Awaited<ReturnType<typeof getActivePageOrCreate>>,
   urls: string[],
 ) {
@@ -336,7 +406,7 @@ async function tryNavigateToAny(
     : new Error("Unable to navigate to any attempted URL.");
 }
 
-function getStartUrlCandidates(inputUrl: string) {
+export function getStartUrlCandidates(inputUrl: string) {
   const normalizedInput = normalizeUrl(inputUrl);
   const candidates = [normalizedInput];
 
@@ -379,7 +449,7 @@ function normalizeUrl(inputUrl: string) {
   return `https://${trimmedUrl}`;
 }
 
-function isUsefulReadResult(result: string) {
+export function isUsefulReadResult(result: string) {
   const normalizedResult = result.trim().toLowerCase();
 
   if (normalizedResult.length < 12) {
