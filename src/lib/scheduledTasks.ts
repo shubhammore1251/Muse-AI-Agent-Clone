@@ -1,3 +1,8 @@
+import {
+  createExecutionId,
+  logAgentEvent,
+  safeErrorMessage,
+} from "@/lib/agentLogger";
 import { supabase } from "@/lib/supabase";
 import { ScheduleConfirmation, ScheduleRule } from "@/types";
 
@@ -34,8 +39,10 @@ export async function createScheduledAgentTask(
   confirmation: ScheduleConfirmation,
   options?: {
     sourceThreadId?: string | null;
+    executionId?: string;
   },
 ) {
+  const executionId = options?.executionId || createExecutionId();
   const nextRunAt = getNextRunAt(confirmation.scheduleRule);
   const taskPayload = {
     ...confirmation.taskPayload,
@@ -44,26 +51,49 @@ export async function createScheduledAgentTask(
       : {}),
   };
 
-  const { data, error } = await supabase
-    .from("scheduled_agent_tasks")
-    .insert({
-      user_id: userId,
-      title: confirmation.title,
-      original_prompt: confirmation.originalPrompt,
-      task_type: confirmation.taskType,
-      task_payload: taskPayload,
-      schedule_rule: confirmation.scheduleRule,
-      timezone: confirmation.timezone,
-      delivery: confirmation.delivery,
-      next_run_at: nextRunAt.toISOString(),
-      status: "active",
-    })
-    .select()
-    .single();
+  const persistenceStartedAt = Date.now();
+  logAgentEvent("Task persistence started", executionId, {
+    frequency: confirmation.scheduleRule.frequency,
+    delivery: confirmation.delivery,
+  });
 
-  if (error) {
-    throw new Error(formatSupabaseError(error));
+  let data: any;
+  try {
+    const result = await supabase
+      .from("scheduled_agent_tasks")
+      .insert({
+        user_id: userId,
+        title: confirmation.title,
+        original_prompt: confirmation.originalPrompt,
+        task_type: confirmation.taskType,
+        task_payload: taskPayload,
+        schedule_rule: confirmation.scheduleRule,
+        timezone: confirmation.timezone,
+        delivery: confirmation.delivery,
+        next_run_at: nextRunAt.toISOString(),
+        status: "active",
+      })
+      .select()
+      .single();
+
+    data = result.data;
+    if (result.error) {
+      throw new Error(formatSupabaseError(result.error));
+    }
+  } catch (error) {
+    logAgentEvent("Task persistence failed", executionId, {
+      status: "failed",
+      duration_ms: Date.now() - persistenceStartedAt,
+      error: safeErrorMessage(error),
+    });
+    throw error;
   }
+
+  logAgentEvent("Task persisted", executionId, {
+    status: "success",
+    task_id: data.id,
+    duration_ms: Date.now() - persistenceStartedAt,
+  });
 
   return data;
 }

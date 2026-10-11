@@ -1,3 +1,8 @@
+import {
+  createExecutionId,
+  logAgentEvent,
+  safeErrorMessage,
+} from "@/lib/agentLogger";
 import { getSupabaseAdminClient } from "@/lib/composioBackend";
 import {
   browserActionTool,
@@ -24,7 +29,11 @@ function getComposioAgentClient() {
   });
 }
 
-async function getPinnedConnectedAccounts(composio: any, userId: string) {
+async function getPinnedConnectedAccounts(
+  composio: any,
+  userId: string,
+  executionId: string,
+) {
   const connectedAccounts: Record<string, string[]> = {};
 
   try {
@@ -43,10 +52,10 @@ async function getPinnedConnectedAccounts(composio: any, userId: string) {
       }
     }
   } catch (error) {
-    console.warn(
-      "[composioAgent] Failed to list active Composio accounts:",
-      error,
-    );
+    logAgentEvent("Connected-account lookup failed", executionId, {
+      source: "composio",
+      error: safeErrorMessage(error),
+    });
   }
 
   try {
@@ -74,10 +83,10 @@ async function getPinnedConnectedAccounts(composio: any, userId: string) {
       }
     }
   } catch (error) {
-    console.warn(
-      "[composioAgent] Failed to read stored tool connections:",
-      error,
-    );
+    logAgentEvent("Connected-account lookup failed", executionId, {
+      source: "supabase_connection_registry",
+      error: safeErrorMessage(error),
+    });
   }
 
   return connectedAccounts;
@@ -90,9 +99,16 @@ function getConnectionSignature(connectedAccounts: Record<string, string[]>) {
     .join("|");
 }
 
-async function getUserComposioSession(userId: string) {
+async function getUserComposioSession(userId: string, executionId: string) {
   const composio = getComposioAgentClient();
-  const connectedAccounts = await getPinnedConnectedAccounts(composio, userId);
+  const connectedAccounts = await getPinnedConnectedAccounts(
+    composio,
+    userId,
+    executionId,
+  );
+  logAgentEvent("Connected accounts loaded", executionId, {
+    integrations: Object.keys(connectedAccounts).sort().join(",") || "none",
+  });
   const connectionSignature = getConnectionSignature(connectedAccounts);
   const existingSession = composioSessionIds.get(userId);
 
@@ -100,7 +116,9 @@ async function getUserComposioSession(userId: string) {
     try {
       return await composio.use(existingSession.sessionId);
     } catch (error) {
-      console.warn("[composioAgent] Failed to reuse Composio session:", error);
+      logAgentEvent("Composio session reuse failed", executionId, {
+        error: safeErrorMessage(error),
+      });
       composioSessionIds.delete(userId);
     }
   }
@@ -121,10 +139,25 @@ async function getUserComposioSession(userId: string) {
   return session;
 }
 
-export async function createCooperAgentForUser(userId: string) {
-  const composioTools = userId
-    ? await (await getUserComposioSession(userId)).tools()
-    : [];
+export async function createCooperAgentForUser(
+  userId: string,
+  executionId = createExecutionId(),
+) {
+  let composioTools: any[];
+  try {
+    composioTools = userId
+      ? await (await getUserComposioSession(userId, executionId)).tools()
+      : [];
+  } catch (error) {
+    logAgentEvent("Tool registry load failed", executionId, {
+      error: safeErrorMessage(error),
+    });
+    throw error;
+  }
+  logAgentEvent("Tool registry loaded", executionId, {
+    composio_tools: composioTools.length,
+    browser_tools: 5,
+  });
 
   return new Agent({
     name: "Cooper",

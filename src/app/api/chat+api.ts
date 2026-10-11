@@ -1,4 +1,12 @@
 import {
+  createExecutionId,
+  logAgentEvent,
+  safeDomain,
+  safeErrorMessage,
+  safeRequestSummary,
+  summarizeArgumentKeys,
+} from "@/lib/agentLogger";
+import {
   createCooperAgentForUser,
   mapMessages,
   parseToolOutput,
@@ -12,6 +20,8 @@ import { closeBrowserSessions } from "@/services/tools/BrowserbaseSession";
 import { run } from "@openai/agents";
 
 export async function POST(req: Request) {
+  const executionId = createExecutionId();
+  const requestStartedAt = Date.now();
   let reqBody: any = {};
   try {
     reqBody = await req.json();
@@ -38,6 +48,37 @@ export async function POST(req: Request) {
 
       const browserSessionIds = new Set<string>();
       let loginRequired = false;
+      let toolCallCount = 0;
+      let toolSequence = 0;
+      const activeToolCalls = new Map<
+        string,
+        { name: string; startedAt: number }
+      >();
+      const pendingToolResults: Array<{
+        name: string;
+        durationMs: number;
+        status: "success" | "failed";
+        resultStatus?: string;
+        error?: string;
+      }> = [];
+      const flushToolResults = (anotherToolSelected: boolean) => {
+        for (const result of pendingToolResults.splice(0)) {
+          logAgentEvent(
+            result.status === "success"
+              ? "Tool execution completed"
+              : "Tool execution failed",
+            executionId,
+            {
+              tool: result.name,
+              duration_ms: result.durationMs,
+              status: result.status,
+              result_status: result.resultStatus,
+              another_tool_selected: anotherToolSelected,
+              error: result.error,
+            },
+          );
+        }
+      };
 
       try {
         send({ type: "activity", activity: "understanding_request" });
@@ -68,8 +109,18 @@ export async function POST(req: Request) {
             : latestUserMessage?.text || "";
 
         const intent = classifyUserIntent(resolvedRequestText);
+        logAgentEvent("Request received", executionId, {
+          request: safeRequestSummary(latestUserMessage?.text),
+        });
+        logAgentEvent("Intent resolved", executionId, {
+          intent: intent.intent,
+          reason: intent.reason,
+        });
 
         if (intent.intent === "clarification_required") {
+          logAgentEvent("Clarification requested", executionId, {
+            status: "pending",
+          });
           send({
             type: "clarification",
             output:
@@ -95,15 +146,30 @@ export async function POST(req: Request) {
             : null;
 
         if (scheduleConfirmation) {
+          logAgentEvent("Execution plan created", executionId, {
+            action: "prepare_recurring_task_confirmation",
+            frequency: scheduleConfirmation.scheduleRule.frequency,
+            delivery: scheduleConfirmation.delivery,
+          });
+          logAgentEvent("Confirmation required", executionId, {
+            status: "pending",
+          });
           send({
             type: "schedule_confirmation",
             output: "Schedule this task?",
             scheduleConfirmation,
+            executionId,
           });
           return;
         }
 
-        const agent = await createCooperAgentForUser(activeUserId || "");
+        logAgentEvent("Execution path selected", executionId, {
+          action: "cooper_agent_tool_loop",
+        });
+        const agent = await createCooperAgentForUser(
+          activeUserId || "",
+          executionId,
+        );
         const result = await run(agent, mapMessages(messages), {
           stream: true,
           maxTurns: 30,
@@ -112,8 +178,63 @@ export async function POST(req: Request) {
         for await (const event of result) {
           if (event.type !== "run_item_stream_event") continue;
 
+          if (event.name === "tool_search_called") {
+            const rawItem = (event.item as any)?.rawItem;
+            logAgentEvent("Tool search started", executionId, {
+              argument_keys: summarizeArgumentKeys(rawItem?.arguments),
+            });
+            continue;
+          }
+
+          if (event.name === "tool_search_output_created") {
+            const rawItem = (event.item as any)?.rawItem;
+            logAgentEvent("Tool search completed", executionId, {
+              available_tools: Array.isArray(rawItem?.tools)
+                ? rawItem.tools.length
+                : undefined,
+            });
+            continue;
+          }
+
           if (event.name === "tool_called") {
-            const toolName = (event.item as any)?.rawItem?.name;
+            flushToolResults(true);
+            const rawItem = (event.item as any)?.rawItem;
+            const toolName = rawItem?.name || "unknown_tool";
+            const toolCallId =
+              rawItem?.callId || rawItem?.id || `${toolName}:${toolSequence}`;
+            const argumentKeys = summarizeArgumentKeys(rawItem?.arguments);
+            toolSequence += 1;
+            toolCallCount += 1;
+            activeToolCalls.set(String(toolCallId), {
+              name: String(toolName),
+              startedAt: Date.now(),
+            });
+            logAgentEvent("Tool selected", executionId, {
+              sequence: toolSequence,
+              integration: getToolIntegration(toolName),
+              tool: toolName,
+              argument_keys: argumentKeys,
+            });
+            logAgentEvent("Tool execution started", executionId, {
+              tool: toolName,
+            });
+
+            if (/^(create_browser_session|browser_navigate)$/i.test(toolName)) {
+              let toolArguments: any = rawItem?.arguments;
+              if (typeof toolArguments === "string") {
+                try {
+                  toolArguments = JSON.parse(toolArguments);
+                } catch {
+                  toolArguments = {};
+                }
+              }
+              logAgentEvent("Browser navigation started", executionId, {
+                destination: safeDomain(
+                  toolArguments?.startUrl || toolArguments?.url,
+                ),
+              });
+            }
+
             send({
               type: "activity",
               activity: getToolActivityStage(toolName),
@@ -133,7 +254,60 @@ export async function POST(req: Request) {
 
           send({ type: "activity", activity: "processing_results" });
 
-          const output = parseToolOutput((event.item as any).output);
+          const outputItem = event.item as any;
+          const output = parseToolOutput(outputItem.output);
+          const rawOutputItem = outputItem.rawItem;
+          const outputName = String(rawOutputItem?.name || "unknown_tool");
+          const outputCallId = String(
+            rawOutputItem?.callId || rawOutputItem?.id || "",
+          );
+          const activeCall = outputCallId
+            ? activeToolCalls.get(outputCallId)
+            : [...activeToolCalls.values()].find(
+                (call) => call.name === outputName,
+              );
+          if (activeCall) {
+            if (outputCallId) activeToolCalls.delete(outputCallId);
+            else {
+              const matchingKey = [...activeToolCalls.entries()].find(
+                ([, call]) => call === activeCall,
+              )?.[0];
+              if (matchingKey) activeToolCalls.delete(matchingKey);
+            }
+
+            const outputStatus = String(output?.status || "").toLowerCase();
+            const outputFailed =
+              rawOutputItem?.status === "incomplete" ||
+              output?.isError === true ||
+              ["failed", "failure", "error", "login_required"].includes(
+                outputStatus,
+              );
+            pendingToolResults.push({
+              name: activeCall.name,
+              durationMs: Date.now() - activeCall.startedAt,
+              status: outputFailed ? "failed" : "success",
+              resultStatus: outputStatus || undefined,
+              error: outputFailed
+                ? safeErrorMessage(
+                    output?.message ||
+                      output?.error ||
+                      "Tool returned an error",
+                  )
+                : undefined,
+            });
+          }
+
+          if (/^(create_browser_session|browser_navigate)$/i.test(outputName)) {
+            logAgentEvent("Browser navigation completed", executionId, {
+              destination: safeDomain(output?.currentUrl),
+              status: output?.status || "completed",
+            });
+          } else if (/^browser_read$/i.test(outputName)) {
+            logAgentEvent("Browser page inspected", executionId, {
+              page: safeDomain(output?.currentUrl),
+              status: output?.status || "completed",
+            });
+          }
 
           if (
             output?.type === "browser_session" &&
@@ -161,15 +335,38 @@ export async function POST(req: Request) {
         await result.completed;
 
         const output = result.finalOutput ?? "";
+        flushToolResults(false);
+        if (toolCallCount === 0) {
+          logAgentEvent("No tool selected", executionId, {
+            reason: "agent_completed_without_tool_call",
+          });
+        }
 
         const connectCta = extractConnectCta(output);
+        logAgentEvent("Final response generated", executionId, {
+          status: "success",
+          response_chars: output.length,
+          duration_ms: Date.now() - requestStartedAt,
+        });
         send({
           type: "final",
           output: connectCta ? cleanConnectLinkFromOutput(output) : output,
           connectCta,
         });
       } catch (error) {
-        console.error("[chat+api] Composio agent error:", error);
+        flushToolResults(false);
+        for (const activeCall of activeToolCalls.values()) {
+          logAgentEvent("Tool execution failed", executionId, {
+            tool: activeCall.name,
+            duration_ms: Date.now() - activeCall.startedAt,
+            status: "failed",
+            error: safeErrorMessage(error),
+          });
+        }
+        logAgentEvent("Request failed", executionId, {
+          duration_ms: Date.now() - requestStartedAt,
+          error: safeErrorMessage(error),
+        });
         send({
           type: "error",
           message: getAgentErrorMessage(error),
@@ -179,10 +376,9 @@ export async function POST(req: Request) {
           try {
             await closeBrowserSessions(browserSessionIds);
           } catch (closeError) {
-            console.error(
-              "[chat+api] Browserbase session pause failed:",
-              closeError,
-            );
+            logAgentEvent("Browser session close failed", executionId, {
+              error: safeErrorMessage(closeError),
+            });
           }
         }
 
@@ -197,6 +393,19 @@ export async function POST(req: Request) {
       "Cache-Control": "no-cache",
     },
   });
+}
+
+function getToolIntegration(toolName: unknown) {
+  const normalized = String(toolName || "").toLowerCase();
+  if (/browser|stagehand|browserbase/.test(normalized)) return "browser";
+  if (/gmail|email|outlook/.test(normalized)) return "gmail";
+  if (/google.?calendar|calendar/.test(normalized)) return "googlecalendar";
+  if (/google.?meet/.test(normalized)) return "google_meet";
+  if (/motion/.test(normalized)) return "motion";
+  if (/slack/.test(normalized)) return "slack";
+  if (/notion/.test(normalized)) return "notion";
+  if (/teams/.test(normalized)) return "microsoftteams";
+  return normalized.split(/[_-]/)[0] || "connected_tool";
 }
 
 function getToolActivityStage(toolName: unknown) {

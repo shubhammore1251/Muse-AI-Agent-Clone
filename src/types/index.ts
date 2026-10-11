@@ -32,6 +32,7 @@ export interface ChatMessage {
     }>;
   };
   scheduleConfirmation?: ScheduleConfirmation;
+  scheduleExecutionId?: string;
   scheduleStatus?: "pending" | "saving" | "confirmed" | "cancelled" | "failed";
   scheduledTaskId?: string;
   scheduleError?: string;

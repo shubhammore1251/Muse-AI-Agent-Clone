@@ -49,23 +49,45 @@ Deno.serve(async (req: Request) => {
     return json({ error: "Method not allowed" }, 405);
   }
 
+  const executionId = createEdgeExecutionId();
+  const requestStartedAt = Date.now();
   try {
     const body = (await req.json().catch(() => ({}))) as RequestBody;
+    const taskSummary = body.task || body.browserTask || body.composioText;
+    logEdgeAgentEvent("Request received", executionId, {
+      mode: body.mode || "execute_task",
+      request: safeEdgeSummary(taskSummary),
+    });
     const supabase = createAdminClient();
 
     if (body.mode === "run_due_schedules") {
-      const result = await runDueSchedules(supabase);
+      logEdgeAgentEvent("Intent resolved", executionId, {
+        intent: "due_schedule_execution",
+      });
+      const result = await runDueSchedules(supabase, executionId);
+      logEdgeAgentEvent("Final response generated", executionId, {
+        status: "success",
+        duration_ms: Date.now() - requestStartedAt,
+      });
       return json({ ok: true, ...result });
     }
 
     const user = await resolveUser(req, supabase, body.userId);
 
     if (body.mode === "run_scheduled_task") {
+      logEdgeAgentEvent("Intent resolved", executionId, {
+        intent: "saved_recurring_task_execution",
+      });
       const result = await runScheduledTaskNow(
         supabase,
         user.id,
         body.scheduledTaskId,
+        executionId,
       );
+      logEdgeAgentEvent("Final response generated", executionId, {
+        status: "success",
+        duration_ms: Date.now() - requestStartedAt,
+      });
       return json({ ok: true, ...result });
     }
 
@@ -91,6 +113,12 @@ Deno.serve(async (req: Request) => {
     const composioText = body.composioText || directComposioPlan?.text;
     const composioArguments =
       body.composioArguments || directComposioPlan?.arguments;
+    logEdgeAgentEvent("Execution plan created", executionId, {
+      action: "execute_requested_task",
+      composio: composioToolSlug || composioToolkitSlug || "none",
+      browserbase: body.browserTask ? "requested" : "not_requested",
+      argument_keys: safeArgumentKeys(composioArguments),
+    });
     const composioAccounts =
       composioToolSlug || composioToolkitSlug
         ? await listComposioAccounts(user.id)
@@ -105,6 +133,8 @@ Deno.serve(async (req: Request) => {
           text: composioText,
           args: composioArguments,
           connectedAccounts,
+          executionId,
+          anotherToolExpected: Boolean(body.browserTask),
         })
       : composioToolkitSlug
         ? await executeComposioAppUseCase({
@@ -113,6 +143,8 @@ Deno.serve(async (req: Request) => {
             useCase: composioUseCase || composioText || task,
             args: composioArguments,
             connectedAccounts,
+            executionId,
+            anotherToolExpected: Boolean(body.browserTask),
           })
         : null;
 
@@ -120,6 +152,7 @@ Deno.serve(async (req: Request) => {
       ? await runBrowserbaseAgent({
           task: body.browserTask,
           poll: body.pollBrowserbase ?? true,
+          executionId,
         })
       : null;
 
@@ -138,6 +171,10 @@ Deno.serve(async (req: Request) => {
       },
     });
 
+    logEdgeAgentEvent("Final response generated", executionId, {
+      status: "success",
+      duration_ms: Date.now() - requestStartedAt,
+    });
     return json({
       ok: true,
       userId: user.id,
@@ -149,12 +186,18 @@ Deno.serve(async (req: Request) => {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    console.error("[agent-run]", message);
+    logEdgeAgentEvent("Request failed", executionId, {
+      duration_ms: Date.now() - requestStartedAt,
+      error: safeEdgeErrorMessage(error),
+    });
     return json({ ok: false, error: message }, 500);
   }
 });
 
-async function runDueSchedules(supabase: ReturnType<typeof createAdminClient>) {
+async function runDueSchedules(
+  supabase: ReturnType<typeof createAdminClient>,
+  requestExecutionId: string,
+) {
   const now = new Date();
   const { data: schedules, error } = await supabase
     .from("scheduled_agent_tasks")
@@ -171,8 +214,12 @@ async function runDueSchedules(supabase: ReturnType<typeof createAdminClient>) {
   const results = [];
 
   for (const schedule of schedules || []) {
+    const executionId = `${requestExecutionId}:${String(schedule.id).slice(0, 8)}`;
     try {
-      const output = await executeScheduledTask(schedule);
+      logEdgeAgentEvent("Intent resolved", executionId, {
+        intent: "saved_recurring_task_execution",
+      });
+      const output = await executeScheduledTask(schedule, executionId);
       const nextRunAt = calculateNextRunAt(schedule);
       const nextStatus = nextRunAt ? "active" : "cancelled";
       const outputSummary = summarizeOutput(output);
@@ -213,10 +260,9 @@ async function runDueSchedules(supabase: ReturnType<typeof createAdminClient>) {
             chatError instanceof Error
               ? chatError.message
               : "Unknown chat delivery error";
-          console.error(
-            "[agent-run] Failed to save scheduled result to chat",
-            chatDeliveryError,
-          );
+          logEdgeAgentEvent("Scheduled result delivery failed", executionId, {
+            error: safeEdgeErrorMessage(chatDeliveryError),
+          });
         }
       }
 
@@ -242,6 +288,9 @@ async function runDueSchedules(supabase: ReturnType<typeof createAdminClient>) {
       }
 
       results.push({ id: schedule.id, status: "completed" });
+      logEdgeAgentEvent("Task execution completed", executionId, {
+        status: "success",
+      });
       if (chatMessageId || chatDeliveryError) {
         results[results.length - 1] = {
           ...results[results.length - 1],
@@ -269,20 +318,18 @@ async function runDueSchedules(supabase: ReturnType<typeof createAdminClient>) {
         });
 
       if (failedRunInsertError) {
-        console.error(
-          "[agent-run] Failed to log failed scheduled task",
-          failedRunInsertError,
-        );
+        logEdgeAgentEvent("Failure record persistence failed", executionId, {
+          error: safeEdgeErrorMessage(failedRunInsertError),
+        });
       }
 
       if (isChatDelivery(schedule)) {
         try {
           await saveScheduledResultToChat(supabase, schedule, null, message);
         } catch (chatError) {
-          console.error(
-            "[agent-run] Failed to save failed scheduled task to chat",
-            chatError,
-          );
+          logEdgeAgentEvent("Scheduled failure delivery failed", executionId, {
+            error: safeEdgeErrorMessage(chatError),
+          });
         }
       }
 
@@ -297,13 +344,16 @@ async function runDueSchedules(supabase: ReturnType<typeof createAdminClient>) {
         .eq("id", schedule.id);
 
       if (failedScheduleUpdateError) {
-        console.error(
-          "[agent-run] Failed to update failed scheduled task status",
-          failedScheduleUpdateError,
-        );
+        logEdgeAgentEvent("Task status update failed", executionId, {
+          error: safeEdgeErrorMessage(failedScheduleUpdateError),
+        });
       }
 
       results.push({ id: schedule.id, status: "failed", error: message });
+      logEdgeAgentEvent("Task execution failed", executionId, {
+        status: "failed",
+        error: safeEdgeErrorMessage(error),
+      });
     }
   }
 
@@ -318,6 +368,7 @@ async function runScheduledTaskNow(
   supabase: ReturnType<typeof createAdminClient>,
   userId: string,
   scheduledTaskId?: string,
+  executionId?: string,
 ) {
   if (!scheduledTaskId) {
     throw new Error("scheduledTaskId is required.");
@@ -335,9 +386,13 @@ async function runScheduledTaskNow(
   }
 
   const now = new Date();
+  const taskExecutionId = executionId || createEdgeExecutionId();
 
   try {
-    const output = await executeScheduledTask(schedule);
+    logEdgeAgentEvent("Intent resolved", taskExecutionId, {
+      intent: "saved_recurring_task_execution",
+    });
+    const output = await executeScheduledTask(schedule, taskExecutionId);
     const outputSummary = summarizeOutput(output);
     const resultText = getScheduledResultText(output);
 
@@ -377,10 +432,9 @@ async function runScheduledTaskNow(
           chatError instanceof Error
             ? chatError.message
             : "Unknown chat delivery error";
-        console.error(
-          "[agent-run] Failed to save manual scheduled result to chat",
-          chatDeliveryError,
-        );
+        logEdgeAgentEvent("Scheduled result delivery failed", taskExecutionId, {
+          error: safeEdgeErrorMessage(chatDeliveryError),
+        });
       }
     }
 
@@ -398,6 +452,9 @@ async function runScheduledTaskNow(
       throw updateError;
     }
 
+    logEdgeAgentEvent("Task execution completed", taskExecutionId, {
+      status: "success",
+    });
     return {
       id: schedule.id,
       status: "completed",
@@ -425,10 +482,9 @@ async function runScheduledTaskNow(
       });
 
     if (failedRunInsertError) {
-      console.error(
-        "[agent-run] Failed to log failed manual scheduled task",
-        failedRunInsertError,
-      );
+      logEdgeAgentEvent("Failure record persistence failed", taskExecutionId, {
+        error: safeEdgeErrorMessage(failedRunInsertError),
+      });
     }
 
     const { error: failedUpdateError } = await supabase
@@ -442,28 +498,33 @@ async function runScheduledTaskNow(
       .eq("id", schedule.id);
 
     if (failedUpdateError) {
-      console.error(
-        "[agent-run] Failed to update failed manual scheduled task",
-        failedUpdateError,
-      );
+      logEdgeAgentEvent("Task status update failed", taskExecutionId, {
+        error: safeEdgeErrorMessage(failedUpdateError),
+      });
     }
 
     if (isChatDelivery(schedule)) {
       try {
         await saveScheduledResultToChat(supabase, schedule, null, message);
       } catch (chatError) {
-        console.error(
-          "[agent-run] Failed to save failed manual scheduled task to chat",
-          chatError,
+        logEdgeAgentEvent(
+          "Scheduled failure delivery failed",
+          taskExecutionId,
+          { error: safeEdgeErrorMessage(chatError) },
         );
       }
     }
+
+    logEdgeAgentEvent("Task execution failed", taskExecutionId, {
+      status: "failed",
+      error: safeEdgeErrorMessage(error),
+    });
 
     throw new Error(message);
   }
 }
 
-async function executeScheduledTask(schedule: JsonRecord) {
+async function executeScheduledTask(schedule: JsonRecord, executionId: string) {
   const payload = toJsonRecord(schedule.task_payload);
   const userId = getRequiredString(schedule, "user_id");
   const task = getFirstString(schedule, payload, [
@@ -506,6 +567,16 @@ async function executeScheduledTask(schedule: JsonRecord) {
     );
   }
 
+  logEdgeAgentEvent("Execution plan created", executionId, {
+    action: "execute_saved_task",
+    integration:
+      composioToolSlug ||
+      composioToolkitSlug ||
+      (browserTask ? "browserbase" : "none"),
+    browserbase: browserTask ? "requested" : "not_requested",
+    argument_keys: safeArgumentKeys(composioArguments),
+  });
+
   const browserbaseRun = browserTask
     ? await runBrowserbaseAgent({
         task: browserTask,
@@ -516,6 +587,7 @@ async function executeScheduledTask(schedule: JsonRecord) {
             "poll_browserbase",
             "pollBrowserbase",
           ) ?? true,
+        executionId,
       })
     : null;
 
@@ -533,6 +605,8 @@ async function executeScheduledTask(schedule: JsonRecord) {
           delivery,
           composioResult: null,
           browserbaseRun,
+          executionId,
+          phase: "draft",
         })
       : null;
 
@@ -566,10 +640,18 @@ async function executeScheduledTask(schedule: JsonRecord) {
 
   const connectedAccounts = toJsonRecordArray(composioAccounts?.items);
 
-  assertConnectedToolkitAvailable(
-    composioToolkitSlug || getToolkitSlugFromToolSlug(composioToolSlug || ""),
-    connectedAccounts,
-  );
+  const expectedToolkit =
+    composioToolkitSlug || getToolkitSlugFromToolSlug(composioToolSlug || "");
+  try {
+    assertConnectedToolkitAvailable(expectedToolkit, connectedAccounts);
+  } catch (error) {
+    logEdgeAgentEvent("Tool selection failed", executionId, {
+      integration: expectedToolkit,
+      reason: "integration_unavailable",
+      error: safeEdgeErrorMessage(error),
+    });
+    throw error;
+  }
   const composioResult = composioToolSlug
     ? await executeComposioTool({
         toolSlug: composioToolSlug,
@@ -577,6 +659,7 @@ async function executeScheduledTask(schedule: JsonRecord) {
         text: composioText,
         args: composioArguments,
         connectedAccounts,
+        executionId,
       })
     : composioToolkitSlug
       ? await executeComposioAppUseCase({
@@ -589,6 +672,7 @@ async function executeScheduledTask(schedule: JsonRecord) {
             `Run scheduled ${delivery} task.`,
           args: composioArguments,
           connectedAccounts,
+          executionId,
         })
       : null;
   const aiResult =
@@ -599,6 +683,8 @@ async function executeScheduledTask(schedule: JsonRecord) {
           delivery,
           composioResult: toJsonRecord(composioResult),
           browserbaseRun,
+          executionId,
+          phase: "final",
         })
       : aiDraft;
 
@@ -624,16 +710,24 @@ async function runOpenAiTask({
   delivery,
   composioResult,
   browserbaseRun,
+  executionId,
+  phase,
 }: {
   task: string;
   title?: string;
   delivery?: string;
   composioResult: JsonRecord | null;
   browserbaseRun: JsonRecord | null;
+  executionId: string;
+  phase: "draft" | "final";
 }) {
   const apiKey = getEnv("OPENAI_API_KEY");
 
   if (!apiKey) {
+    logEdgeAgentEvent("Model execution skipped", executionId, {
+      phase,
+      reason: "missing_api_key",
+    });
     return {
       skipped: true,
       reason: "OPENAI_API_KEY is not configured.",
@@ -664,6 +758,11 @@ async function runOpenAiTask({
 
   const model = getEnv("OPENAI_MODEL") || "gpt-5-nano";
   let response: JsonRecord;
+  const startedAt = Date.now();
+  logEdgeAgentEvent("Model execution started", executionId, {
+    model,
+    phase,
+  });
 
   try {
     response = await apiFetch("https://api.openai.com/v1/responses", {
@@ -688,6 +787,12 @@ async function runOpenAiTask({
       throw error;
     }
 
+    logEdgeAgentEvent("Model retry", executionId, {
+      phase,
+      reason: safeEdgeErrorMessage(error),
+      fallback: "chat_completions",
+    });
+
     response = await apiFetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -710,6 +815,11 @@ async function runOpenAiTask({
     });
   }
 
+  logEdgeAgentEvent("Model execution completed", executionId, {
+    phase,
+    status: "success",
+    duration_ms: Date.now() - startedAt,
+  });
   return {
     outputText:
       extractOpenAiOutputText(response) ||
@@ -1100,12 +1210,16 @@ async function executeComposioTool({
   text,
   args,
   connectedAccounts,
+  executionId,
+  anotherToolExpected = false,
 }: {
   toolSlug: string;
   userId: string;
   text?: string;
   args?: JsonRecord;
   connectedAccounts: JsonRecord[];
+  executionId: string;
+  anotherToolExpected?: boolean;
 }) {
   const matchingAccount = connectedAccounts.find((account) => {
     const toolkitSlug = getAccountToolkitSlug(account);
@@ -1124,49 +1238,114 @@ async function executeComposioTool({
     },
   };
 
-  return composioFetch(
-    `/api/v3.1/tools/execute/${encodeURIComponent(toolSlug)}`,
-    {
-      method: "POST",
-      body: JSON.stringify(payload),
-    },
-  );
+  const startedAt = Date.now();
+  logEdgeAgentEvent("Tool selected", executionId, {
+    integration: getToolkitSlugFromToolSlug(toolSlug) || "composio",
+    tool: toolSlug,
+    argument_keys: safeArgumentKeys(payload.arguments),
+  });
+  logEdgeAgentEvent("Tool execution started", executionId, { tool: toolSlug });
+  try {
+    const result = await composioFetch(
+      `/api/v3.1/tools/execute/${encodeURIComponent(toolSlug)}`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+    );
+    logEdgeAgentEvent("Tool execution completed", executionId, {
+      tool: toolSlug,
+      duration_ms: Date.now() - startedAt,
+      status: "success",
+      another_tool_selected: anotherToolExpected,
+    });
+    return result;
+  } catch (error) {
+    logEdgeAgentEvent("Tool execution failed", executionId, {
+      tool: toolSlug,
+      duration_ms: Date.now() - startedAt,
+      status: "failed",
+      error: safeEdgeErrorMessage(error),
+    });
+    throw error;
+  }
 }
 
 async function runBrowserbaseAgent({
   task,
   poll,
+  executionId,
 }: {
   task: string;
   poll: boolean;
+  executionId: string;
 }) {
-  const run = await browserbaseFetch("/v1/agents/runs", {
-    method: "POST",
-    body: JSON.stringify({
-      task,
-      resultSchema: {
-        type: "object",
-        properties: {
-          summary: { type: "string" },
-          sourceUrl: { type: "string" },
-        },
-      },
-    }),
+  const startedAt = Date.now();
+  logEdgeAgentEvent("Tool selected", executionId, {
+    integration: "browserbase",
+    tool: "browserbase_agent_run",
   });
+  logEdgeAgentEvent("Browserbase run started", executionId, {
+    requested_domain: safeEdgeDomain(task),
+  });
+  logEdgeAgentEvent("Tool execution started", executionId, {
+    tool: "browserbase_agent_run",
+  });
+  try {
+    const run = await browserbaseFetch("/v1/agents/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        task,
+        resultSchema: {
+          type: "object",
+          properties: {
+            summary: { type: "string" },
+            sourceUrl: { type: "string" },
+          },
+        },
+      }),
+    });
 
-  if (!poll || !run.runId) {
-    return run;
+    let result = run;
+    if (poll && run.runId) {
+      const completed = await pollBrowserbaseRun(String(run.runId));
+      const sessionId = completed.sessionId ? String(completed.sessionId) : "";
+      const liveView = sessionId
+        ? await getBrowserbaseLiveView(sessionId)
+        : null;
+
+      result = {
+        ...completed,
+        liveViewUrl:
+          liveView?.debuggerFullscreenUrl || liveView?.debuggerUrl || null,
+      };
+    }
+
+    const runStatus = String(result.status || "completed").toLowerCase();
+    logEdgeAgentEvent(
+      ["completed", "success", "succeeded"].includes(runStatus)
+        ? "Browserbase run completed"
+        : "Browserbase run failed",
+      executionId,
+      {
+        source_domain: safeEdgeDomain(getString(result.sourceUrl)),
+        duration_ms: Date.now() - startedAt,
+        status: runStatus,
+        error: ["completed", "success", "succeeded"].includes(runStatus)
+          ? undefined
+          : safeEdgeErrorMessage(result.error || result.message || runStatus),
+      },
+    );
+    return result;
+  } catch (error) {
+    logEdgeAgentEvent("Tool execution failed", executionId, {
+      tool: "browserbase_agent_run",
+      duration_ms: Date.now() - startedAt,
+      status: "failed",
+      error: safeEdgeErrorMessage(error),
+    });
+    throw error;
   }
-
-  const completed = await pollBrowserbaseRun(String(run.runId));
-  const sessionId = completed.sessionId ? String(completed.sessionId) : "";
-  const liveView = sessionId ? await getBrowserbaseLiveView(sessionId) : null;
-
-  return {
-    ...completed,
-    liveViewUrl:
-      liveView?.debuggerFullscreenUrl || liveView?.debuggerUrl || null,
-  };
 }
 
 async function pollBrowserbaseRun(runId: string) {
@@ -1515,14 +1694,22 @@ async function executeComposioAppUseCase({
   useCase,
   args,
   connectedAccounts,
+  executionId,
+  anotherToolExpected = false,
 }: {
   toolkitSlug: string;
   userId: string;
   useCase: string;
   args?: JsonRecord;
   connectedAccounts: JsonRecord[];
+  executionId: string;
+  anotherToolExpected?: boolean;
 }) {
   assertConnectedToolkitAvailable(toolkitSlug, connectedAccounts);
+  logEdgeAgentEvent("Tool search started", executionId, {
+    integration: toolkitSlug,
+    argument_keys: safeArgumentKeys(args),
+  });
 
   const session = await createComposioToolRouterSession({
     userId,
@@ -1534,23 +1721,43 @@ async function executeComposioAppUseCase({
     "session_id",
     "Composio session",
   );
-  const search = await searchComposioSessionTools({
-    sessionId,
-    useCase,
-    args,
-  });
+  let search: JsonRecord;
+  try {
+    search = await searchComposioSessionTools({
+      sessionId,
+      useCase,
+      args,
+    });
+  } catch (error) {
+    logEdgeAgentEvent("Tool search failed", executionId, {
+      integration: toolkitSlug,
+      error: safeEdgeErrorMessage(error),
+    });
+    throw error;
+  }
   const toolSlug = getFirstComposioSearchToolSlug(search);
 
   if (!toolSlug) {
+    logEdgeAgentEvent("Tool selection failed", executionId, {
+      integration: toolkitSlug,
+      reason: "no_matching_tool_returned",
+    });
     throw new Error(
       `Composio could not find a ${formatDeliveryName(toolkitSlug)} tool for: ${useCase}`,
     );
   }
 
+  logEdgeAgentEvent("Tool selected", executionId, {
+    integration: toolkitSlug,
+    tool: toolSlug,
+    argument_keys: safeArgumentKeys(args),
+  });
   return executeComposioSessionTool({
     sessionId,
     toolSlug,
     args,
+    executionId,
+    anotherToolExpected,
   });
 }
 
@@ -1619,21 +1826,44 @@ async function executeComposioSessionTool({
   sessionId,
   toolSlug,
   args,
+  executionId,
+  anotherToolExpected = false,
 }: {
   sessionId: string;
   toolSlug: string;
   args?: JsonRecord;
+  executionId: string;
+  anotherToolExpected?: boolean;
 }) {
-  return composioFetch(
-    `/api/v3.1/tool_router/session/${encodeURIComponent(sessionId)}/execute`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        tool_slug: toolSlug,
-        arguments: args || {},
-      }),
-    },
-  );
+  const startedAt = Date.now();
+  logEdgeAgentEvent("Tool execution started", executionId, { tool: toolSlug });
+  try {
+    const result = await composioFetch(
+      `/api/v3.1/tool_router/session/${encodeURIComponent(sessionId)}/execute`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          tool_slug: toolSlug,
+          arguments: args || {},
+        }),
+      },
+    );
+    logEdgeAgentEvent("Tool execution completed", executionId, {
+      tool: toolSlug,
+      duration_ms: Date.now() - startedAt,
+      status: "success",
+      another_tool_selected: anotherToolExpected,
+    });
+    return result;
+  } catch (error) {
+    logEdgeAgentEvent("Tool execution failed", executionId, {
+      tool: toolSlug,
+      duration_ms: Date.now() - startedAt,
+      status: "failed",
+      error: safeEdgeErrorMessage(error),
+    });
+    throw error;
+  }
 }
 
 function getFirstComposioSearchToolSlug(search: JsonRecord) {
@@ -1739,6 +1969,92 @@ function mustGetEnv(name: string) {
     throw new Error(`${name} is missing`);
   }
   return value;
+}
+
+function createEdgeExecutionId() {
+  return crypto.randomUUID();
+}
+
+function logEdgeAgentEvent(
+  event: string,
+  executionId: string,
+  details: Record<string, unknown> = {},
+) {
+  const fields = Object.entries(details)
+    .filter(([, value]) => value !== undefined && value !== null)
+    .map(([key, value]) => `${key}=${formatEdgeField(value)}`)
+    .join(" | ");
+  console.info(
+    `[Agent] ${event} | id=${formatEdgeField(executionId)}${fields ? ` | ${fields}` : ""}`,
+  );
+}
+
+function safeEdgeSummary(value: unknown, maxLength = 120) {
+  if (typeof value !== "string") return "<unavailable>";
+  return sanitizeEdgeLogText(value)
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function safeEdgeErrorMessage(error: unknown, maxLength = 180) {
+  const message = error instanceof Error ? error.message : String(error);
+  return sanitizeEdgeLogText(message)
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function safeEdgeDomain(value: unknown) {
+  if (typeof value !== "string") return "unknown";
+  const url = value.match(/https?:\/\/[^\s"'<>]+/i)?.[0];
+  if (!url) return "unknown";
+  try {
+    return new URL(url).hostname.replace(/^www\./i, "").slice(0, 100);
+  } catch {
+    return "unknown";
+  }
+}
+
+function safeArgumentKeys(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "none";
+  }
+  const keys = Object.keys(value)
+    .filter(
+      (key) =>
+        !/(token|secret|password|credential|cookie|auth|emailbody)/i.test(key),
+    )
+    .slice(0, 12);
+  return keys.length ? keys.join(",") : "none";
+}
+
+function formatEdgeField(value: unknown) {
+  const text = sanitizeEdgeLogText(String(value));
+  return /[\s|"\\]/.test(text) ? JSON.stringify(text) : text;
+}
+
+function sanitizeEdgeLogText(value: string) {
+  return value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [REDACTED]")
+    .replace(
+      /\b(sk-[A-Za-z0-9_-]{8,}|sb_secret_[A-Za-z0-9_-]+|eyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b/g,
+      "[REDACTED]",
+    )
+    .replace(
+      /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*[^\s,;]+/gi,
+      "$1=[REDACTED]",
+    )
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED_EMAIL]")
+    .replace(/\b\d{13,19}\b/g, "[REDACTED_NUMBER]")
+    .replace(/https?:\/\/[^\s)]+/gi, (url) => {
+      try {
+        const parsed = new URL(url);
+        return `${parsed.protocol}//${parsed.hostname}${parsed.pathname === "/" ? "" : parsed.pathname}`;
+      } catch {
+        return "[URL]";
+      }
+    });
 }
 
 function getEnv(name: string) {

@@ -9,6 +9,7 @@
 import { ChatBrowserPreview } from "@/components/common/ChatBrowserPreview";
 import { Colors } from "@/constants/colors";
 import { showToast } from "@/context/ToastContext";
+import { logAgentEvent, safeErrorMessage } from "@/lib/agentLogger";
 import {
   createScheduledAgentTask,
   formatScheduleRule,
@@ -165,6 +166,7 @@ export default function ChatScreen() {
           }),
           clarification: msg.metadata?.clarification,
           scheduleConfirmation: msg.metadata?.scheduleConfirmation,
+          scheduleExecutionId: msg.metadata?.scheduleExecutionId,
           scheduleStatus: msg.metadata?.scheduleStatus,
           scheduledTaskId: msg.metadata?.scheduledTaskId,
           scheduleError: msg.metadata?.scheduleError,
@@ -356,6 +358,7 @@ export default function ChatScreen() {
                         ...msg,
                         text: data.output ?? "Schedule this task?",
                         scheduleConfirmation: data.scheduleConfirmation,
+                        scheduleExecutionId: data.executionId,
                         scheduleStatus: "pending",
                       }
                     : msg,
@@ -371,6 +374,7 @@ export default function ChatScreen() {
               data.output ?? "Schedule this task?",
               {
                 scheduleConfirmation: data.scheduleConfirmation,
+                scheduleExecutionId: data.executionId,
                 scheduleStatus: "pending",
               },
             );
@@ -436,7 +440,6 @@ export default function ChatScreen() {
         if (data.type === "error") throw new Error(data.message);
       }
     } catch (error) {
-      console.error("Error sending message:", error);
       const errorMessage =
         error instanceof Error ? error.message : "Failed to send message";
 
@@ -516,6 +519,7 @@ export default function ChatScreen() {
         message.scheduleConfirmation,
         {
           sourceThreadId: threadId,
+          executionId: message.scheduleExecutionId,
         },
       );
 
@@ -541,13 +545,13 @@ export default function ChatScreen() {
           scheduledTaskId: task.id,
         });
       } catch (error) {
-        console.error(
-          "Failed to persist schedule confirmation metadata:",
-          error,
+        logAgentEvent(
+          "Confirmation metadata update failed",
+          message.scheduleExecutionId || messageId,
+          { error: safeErrorMessage(error) },
         );
       }
     } catch (error) {
-      console.error("Failed to create schedule:", error);
       const errorMessage = getScheduleCreateErrorMessage(error);
 
       setMessages((prev) =>
@@ -585,12 +589,24 @@ export default function ChatScreen() {
       ),
     );
 
+    logAgentEvent(
+      "Confirmation cancelled",
+      message.scheduleExecutionId || messageId,
+      {
+        status: "cancelled",
+      },
+    );
+
     if (message?.scheduleConfirmation) {
       updateMessage(messageId, "Schedule cancelled.", {
         scheduleConfirmation: message.scheduleConfirmation,
         scheduleStatus: "cancelled",
       }).catch((error: any) => {
-        console.error("Failed to persist schedule cancellation:", error);
+        logAgentEvent(
+          "Confirmation cancellation metadata update failed",
+          message.scheduleExecutionId || messageId,
+          { error: safeErrorMessage(error) },
+        );
       });
     }
   };
@@ -604,6 +620,13 @@ export default function ChatScreen() {
       return;
     }
 
+    logAgentEvent(
+      "Confirmation edit requested",
+      message.scheduleExecutionId || messageId,
+      {
+        status: "editing",
+      },
+    );
     setInputText(message.scheduleConfirmation.originalPrompt);
     handleCancelSchedule(messageId);
     showToast("Edit the request, then send it again.");
