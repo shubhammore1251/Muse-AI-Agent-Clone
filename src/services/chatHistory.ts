@@ -154,44 +154,40 @@ export const saveMessage = async (
     .eq("id", threadId);
 
   if (role === "assistant" && content.trim()) {
-    try {
-      const { data: thread, error: threadError } = await supabase
-        .from("chat_threads")
-        .select("*")
-        .eq("id", threadId)
-        .single();
-
-      if (threadError) throw threadError;
-
-      if (thread?.type === "side" && thread?.title === "New side chat") {
-        const response = await axios.post(
-          getApiUrl("/chat-title"),
-          { assistantResponse: content },
-          { timeout: 60000 },
-        );
-
-        const generatedTitle = response.data?.title?.trim();
-        console.log("Generated title:", generatedTitle);
-
-        if (generatedTitle && generatedTitle !== "SKIP_TITLE") {
-          console.log("Updating title:", generatedTitle);
-          const { error: titleError } = await supabase
-            .from("chat_threads")
-            .update({ title: generatedTitle })
-            .eq("id", threadId);
-
-          if (titleError) {
-            console.error("Failed to update title:", titleError);
-          }
-        }
-      }
-    } catch (error) {
-      console.error("Chat title generation failed:", error);
-    }
+    void generateSideChatTitle(threadId, content).catch((titleError) => {
+      console.error("Chat title generation failed:", titleError);
+    });
   }
 
   return data;
 };
+
+async function generateSideChatTitle(threadId: string, content: string) {
+  const { data: thread, error: threadError } = await supabase
+    .from("chat_threads")
+    .select("*")
+    .eq("id", threadId)
+    .single();
+
+  if (threadError) throw threadError;
+  if (thread?.type !== "side" || thread?.title !== "New side chat") return;
+
+  const response = await axios.post(
+    getApiUrl("/chat-title"),
+    { assistantResponse: content },
+    { timeout: 60000 },
+  );
+  const generatedTitle = response.data?.title?.trim();
+
+  if (generatedTitle && generatedTitle !== "SKIP_TITLE") {
+    const { error: titleError } = await supabase
+      .from("chat_threads")
+      .update({ title: generatedTitle })
+      .eq("id", threadId);
+
+    if (titleError) throw titleError;
+  }
+}
 
 export const updateMessage = async (
   messageId: string,

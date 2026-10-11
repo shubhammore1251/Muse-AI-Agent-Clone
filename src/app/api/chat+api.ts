@@ -37,6 +37,7 @@ export async function POST(req: Request) {
       let loginRequired = false;
 
       try {
+        send({ type: "activity", activity: "understanding_request" });
         const latestUserMessage = [...messages]
           .reverse()
           .find(
@@ -66,12 +67,28 @@ export async function POST(req: Request) {
         });
 
         for await (const event of result) {
-          if (
-            event.type !== "run_item_stream_event" ||
-            event.name !== "tool_output"
-          ) {
+          if (event.type !== "run_item_stream_event") continue;
+
+          if (event.name === "tool_called") {
+            const toolName = (event.item as any)?.rawItem?.name;
+            send({
+              type: "activity",
+              activity: getToolActivityStage(toolName),
+            });
             continue;
           }
+
+          if (event.name === "message_output_created") {
+            const phase = (event.item as any)?.rawItem?.phase;
+            if (phase !== "commentary") {
+              send({ type: "activity", activity: "preparing_response" });
+            }
+            continue;
+          }
+
+          if (event.name !== "tool_output") continue;
+
+          send({ type: "activity", activity: "processing_results" });
 
           const output = parseToolOutput((event.item as any).output);
 
@@ -137,6 +154,19 @@ export async function POST(req: Request) {
       "Cache-Control": "no-cache",
     },
   });
+}
+
+function getToolActivityStage(toolName: unknown) {
+  if (typeof toolName !== "string") return "using_connected_tools";
+
+  const normalizedName = toolName.toLowerCase();
+  if (/browser|web[_-]?search|search[_-]?web/.test(normalizedName)) {
+    return "browsing_web";
+  }
+  if (/gmail|outlook|email|mail/.test(normalizedName)) return "using_email";
+  if (/calendar/.test(normalizedName)) return "using_calendar";
+  if (/slack/.test(normalizedName)) return "using_slack";
+  return "using_connected_tools";
 }
 
 function getAgentErrorMessage(error: unknown) {

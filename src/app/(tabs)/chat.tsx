@@ -35,6 +35,7 @@ import * as WebBrowser from "expo-web-browser";
 import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Animated,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -48,36 +49,60 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+type AgentActivityStage =
+  | "thinking"
+  | "understanding_request"
+  | "browsing_web"
+  | "using_connected_tools"
+  | "using_email"
+  | "using_calendar"
+  | "using_slack"
+  | "processing_results"
+  | "preparing_response";
+type AgentActivity = {
+  current: AgentActivityStage;
+  completed: AgentActivityStage[];
+} | null;
+
 export default function ChatScreen() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState("");
   const scrollViewRef = useRef<ScrollView>(null);
   const shouldAutoScrollRef = useRef(true);
   const insets = useSafeAreaInsets();
+  const [isLoadingMessages, setIsLoadingMessages] = useState(true);
   const [isSending, setIsSending] = useState(false);
+  const [agentActivity, setAgentActivity] = useState<AgentActivity>(null);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [threadData, setThreadData] = useState<any>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+  const historyLoadIdRef = useRef(0);
+  const activeAgentRequestIdRef = useRef(0);
+  const isSendingRef = useRef(false);
+  const threadIdRef = useRef(threadId);
+  threadIdRef.current = threadId;
 
   const { sideChatThreadId } = useLocalSearchParams();
-
-  useEffect(() => {
-    if (sideChatThreadId) {
-      setThreadId(sideChatThreadId as string);
-    }
-  }, [sideChatThreadId]);
+  const requestedThreadId =
+    typeof sideChatThreadId === "string" ? sideChatThreadId : null;
 
   // Calculate header height offset for iOS KeyboardAvoidingView
   const headerOffset = Platform.OS === "web" ? 0 : insets.top + 98;
 
   useEffect(() => {
     const loadUser = async () => {
-      const data = await supabase.auth.getSession();
-      const email = data?.data?.session?.user?.email;
-      const uid = data?.data?.session?.user?.id;
-      setUserEmail(email ?? null);
-      setUserId(uid ?? null);
+      try {
+        const data = await supabase.auth.getSession();
+        const email = data?.data?.session?.user?.email;
+        const uid = data?.data?.session?.user?.id;
+        setUserEmail(email ?? null);
+        setUserId(uid ?? null);
+        if (!email) setIsLoadingMessages(false);
+      } catch (error) {
+        console.error("Failed to load chat user:", error);
+        setIsLoadingMessages(false);
+      }
     };
     loadUser();
   }, []);
@@ -89,39 +114,79 @@ export default function ChatScreen() {
   }, [messages]);
 
   useEffect(() => {
-    userEmail && GetThreadData();
-    threadId && userEmail && getChatHistory();
-  }, [threadId, userEmail]);
+    if (!requestedThreadId && !userEmail) return;
 
-  const getChatHistory = async () => {
-    const messages = await loadMessages(threadId ?? "");
-    const MappedMessages = messages?.map((msg: any) => ({
-      id: msg.id,
-      sender: msg.role === "user" ? "user" : "agent",
-      text: msg.content,
-      timestamp: new Date(msg.created_at).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
-      scheduleConfirmation: msg.metadata?.scheduleConfirmation,
-      scheduleStatus: msg.metadata?.scheduleStatus,
-      scheduledTaskId: msg.metadata?.scheduledTaskId,
-      scheduleError: msg.metadata?.scheduleError,
-    })) as ChatMessage[];
+    let active = true;
+    const loadId = ++historyLoadIdRef.current;
 
-    setMessages(MappedMessages ?? []);
-  };
+    activeAgentRequestIdRef.current += 1;
+    isSendingRef.current = false;
+    setIsSending(false);
+    setAgentActivity(null);
+    setIsLoadingMessages(true);
+    setMessages([]);
 
-  const GetThreadData = async () => {
-    if (!threadId) {
-      let Thread = await getThread(threadId ?? "", userEmail ?? "");
-      if (!Thread) {
-        Thread = await CreateNewThread(userEmail ?? "", "main", "Main Chat");
+    const loadThreadAndMessages = async () => {
+      try {
+        let thread;
+        if (requestedThreadId) {
+          setThreadId(requestedThreadId);
+          thread = await getThread(requestedThreadId, userEmail ?? "");
+        } else {
+          thread = await getThread("", userEmail ?? "");
+          if (!thread) {
+            thread = await CreateNewThread(
+              userEmail ?? "",
+              "main",
+              "Main Chat",
+            );
+          }
+          if (active) setThreadId(thread?.id ?? null);
+        }
+
+        if (!active || historyLoadIdRef.current !== loadId) return;
+        setThreadData(thread);
+
+        const activeThreadId = thread?.id ?? requestedThreadId;
+        if (!activeThreadId) return;
+
+        const history = await loadMessages(activeThreadId);
+        if (!active || historyLoadIdRef.current !== loadId) return;
+
+        const mappedMessages = history?.map((msg: any) => ({
+          id: msg.id,
+          sender: msg.role === "user" ? "user" : "agent",
+          text: msg.content,
+          timestamp: new Date(msg.created_at).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+          scheduleConfirmation: msg.metadata?.scheduleConfirmation,
+          scheduleStatus: msg.metadata?.scheduleStatus,
+          scheduledTaskId: msg.metadata?.scheduledTaskId,
+          scheduleError: msg.metadata?.scheduleError,
+        })) as ChatMessage[];
+
+        setMessages(mappedMessages ?? []);
+      } catch (error) {
+        if (active && historyLoadIdRef.current === loadId) {
+          console.error("Failed to load chat history:", error);
+          setMessages([]);
+          showToast("Couldn't load this chat's messages.");
+        }
+      } finally {
+        if (active && historyLoadIdRef.current === loadId) {
+          setIsLoadingMessages(false);
+        }
       }
-      setThreadData(Thread);
-      setThreadId(Thread?.id ?? null);
-    }
-  };
+    };
+
+    void loadThreadAndMessages();
+    return () => {
+      active = false;
+      historyLoadIdRef.current += 1;
+    };
+  }, [requestedThreadId, userEmail]);
 
   // Scroll to bottom when keyboard appears
   useEffect(() => {
@@ -139,30 +204,61 @@ export default function ChatScreen() {
 
   const handleSend = async () => {
     const text = inputText.trim();
-    if (!text) return;
+    if (!text || isLoadingMessages || isSendingRef.current) return;
 
     Keyboard.dismiss();
     shouldAutoScrollRef.current = true;
+    const requestId = ++activeAgentRequestIdRef.current;
+    const requestThreadId = threadId ?? "";
+    const agentMessageId = `msg-${Date.now()}-${requestId}`;
+    const timestamp = new Date().toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    isSendingRef.current = true;
     setIsSending(true);
+    setAgentActivity({ current: "thinking", completed: [] });
 
     const userMsg: ChatMessage = {
-      id: `msg-${Date.now()}`,
+      id: `msg-${Date.now()}-${requestId}-user`,
       sender: "user",
       text,
-      timestamp: new Date().toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
+      timestamp,
     };
 
-    setMessages((prev) => [...prev, userMsg]);
+    setMessages((prev) => [
+      ...prev,
+      userMsg,
+      { id: agentMessageId, sender: "agent", text: "", timestamp },
+    ]);
     setInputText("");
 
-    await saveMessage(threadId ?? "", userEmail ?? "", "user", text, {});
+    const stopAgentLoader = () => {
+      if (activeAgentRequestIdRef.current !== requestId) return;
+      isSendingRef.current = false;
+      setIsSending(false);
+      setAgentActivity(null);
+    };
+    const isRequestCurrent = () =>
+      activeAgentRequestIdRef.current === requestId &&
+      threadIdRef.current === requestThreadId;
+    const recordAgentActivity = (stage: unknown) => {
+      if (!isRequestCurrent() || !isAgentActivityStage(stage)) return;
 
-    const agentMessageId = `msg-${Date.now() + 1}`;
+      setAgentActivity((previous) => {
+        if (!previous) return { current: stage, completed: [] };
+        if (previous.current === stage) return previous;
+
+        return {
+          current: stage,
+          completed: [...previous.completed, previous.current].slice(-3),
+        };
+      });
+    };
 
     try {
+      await saveMessage(requestThreadId, userEmail ?? "", "user", text, {});
+
       const ApiUrl = getApiUrl("/chat");
 
       const response = await fetch(ApiUrl, {
@@ -183,22 +279,7 @@ export default function ChatScreen() {
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
-
       let buffer = "";
-
-      // Add placeholder message immediately
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: agentMessageId,
-          sender: "agent",
-          text: "Thinking...",
-          timestamp: new Date().toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          }),
-        },
-      ]);
 
       while (true) {
         const { value, done } = await reader.read();
@@ -219,36 +300,43 @@ export default function ChatScreen() {
 
           const data = JSON.parse(line);
 
+          if (data.type === "activity") {
+            recordAgentActivity(data.activity);
+          }
+
           if (data.type === "browser") {
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === agentMessageId
-                  ? {
-                      ...msg,
-                      browserPreview: data.browser,
-                    }
-                  : msg,
-              ),
-            );
+            if (isRequestCurrent()) {
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === agentMessageId
+                    ? { ...msg, browserPreview: data.browser }
+                    : msg,
+                ),
+              );
+            }
           }
 
           if (data.type === "final") {
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === agentMessageId
-                  ? {
-                      ...msg,
-                      text:
-                        data.output ?? "No Response from AI agent, Try Again",
-                      connectCta: data.connectCta || undefined,
-                      browserPreview: data.browserPreview || msg.browserPreview,
-                    }
-                  : msg,
-              ),
-            );
+            if (isRequestCurrent()) {
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === agentMessageId
+                    ? {
+                        ...msg,
+                        text:
+                          data.output ?? "No Response from AI agent, Try Again",
+                        connectCta: data.connectCta || undefined,
+                        browserPreview:
+                          data.browserPreview || msg.browserPreview,
+                      }
+                    : msg,
+                ),
+              );
+            }
+            stopAgentLoader();
 
             await saveMessage(
-              threadId ?? "",
+              requestThreadId,
               userEmail ?? "",
               "assistant",
               data.output ?? "No Response from AI agent, Try Again",
@@ -257,21 +345,24 @@ export default function ChatScreen() {
           }
 
           if (data.type === "schedule_confirmation") {
-            setMessages((prev) =>
-              prev.map((msg) =>
-                msg.id === agentMessageId
-                  ? {
-                      ...msg,
-                      text: data.output ?? "Schedule this task?",
-                      scheduleConfirmation: data.scheduleConfirmation,
-                      scheduleStatus: "pending",
-                    }
-                  : msg,
-              ),
-            );
+            if (isRequestCurrent()) {
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === agentMessageId
+                    ? {
+                        ...msg,
+                        text: data.output ?? "Schedule this task?",
+                        scheduleConfirmation: data.scheduleConfirmation,
+                        scheduleStatus: "pending",
+                      }
+                    : msg,
+                ),
+              );
+            }
+            stopAgentLoader();
 
             const savedScheduleMessage = await saveMessage(
-              threadId ?? "",
+              requestThreadId,
               userEmail ?? "",
               "assistant",
               data.output ?? "Schedule this task?",
@@ -281,7 +372,7 @@ export default function ChatScreen() {
               },
             );
 
-            if (savedScheduleMessage?.id) {
+            if (savedScheduleMessage?.id && isRequestCurrent()) {
               setMessages((prev) =>
                 prev.map((msg) =>
                   msg.id === agentMessageId
@@ -297,25 +388,27 @@ export default function ChatScreen() {
           }
         }
       }
+
+      if (buffer.trim()) {
+        const data = JSON.parse(buffer);
+        if (data.type === "error") throw new Error(data.message);
+      }
     } catch (error) {
       console.error("Error sending message:", error);
       const errorMessage =
         error instanceof Error ? error.message : "Failed to send message";
 
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === agentMessageId
-            ? {
-                ...msg,
-                text: errorMessage,
-              }
-            : msg,
-        ),
-      );
+      if (isRequestCurrent()) {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === agentMessageId ? { ...msg, text: errorMessage } : msg,
+          ),
+        );
+      }
 
       showToast(errorMessage);
     } finally {
-      setIsSending(false);
+      stopAgentLoader();
     }
   };
 
@@ -470,173 +563,183 @@ export default function ChatScreen() {
               </View>
 
               {/* Messages */}
-              {messages.map((msg) => {
-                const isUser = msg.sender === "user";
-                return (
-                  <TouchableOpacity
-                    key={msg.id}
-                    activeOpacity={0.9}
-                    onPress={() => showToast(msg.text)}
-                    style={[
-                      styles.messageRow,
-                      isUser ? styles.userMessageRow : styles.agentMessageRow,
-                    ]}
-                  >
-                    <View
+              {isLoadingMessages ? (
+                <ChatHistorySkeleton />
+              ) : messages.length === 0 ? (
+                <View style={styles.emptyChat}>
+                  <Text style={styles.emptyChatText}>
+                    Start a conversation with Cooper.
+                  </Text>
+                </View>
+              ) : (
+                messages.map((msg) => {
+                  const isUser = msg.sender === "user";
+                  if (
+                    !msg.text.trim() &&
+                    !msg.connectCta &&
+                    !msg.browserPreview &&
+                    !msg.scheduleConfirmation
+                  ) {
+                    return null;
+                  }
+
+                  return (
+                    <TouchableOpacity
+                      key={msg.id}
+                      activeOpacity={0.9}
+                      onPress={() => showToast(msg.text)}
                       style={[
-                        styles.bubble,
-                        isUser ? styles.userBubble : styles.agentBubble,
+                        styles.messageRow,
+                        isUser ? styles.userMessageRow : styles.agentMessageRow,
                       ]}
                     >
-                      <Text
+                      <View
                         style={[
-                          styles.bubbleText,
-                          isUser
-                            ? styles.userBubbleText
-                            : styles.agentBubbleText,
+                          styles.bubble,
+                          isUser ? styles.userBubble : styles.agentBubble,
                         ]}
                       >
-                        {msg.text}
-                      </Text>
+                        <Text
+                          style={[
+                            styles.bubbleText,
+                            isUser
+                              ? styles.userBubbleText
+                              : styles.agentBubbleText,
+                          ]}
+                        >
+                          {msg.text}
+                        </Text>
 
-                      {!isUser && msg.connectCta ? (
-                        <View style={styles.connectCard}>
-                          <View style={styles.connectIcon}>
-                            <HugeiconsIcon
-                              icon={Link02Icon}
-                              size={20}
-                              color={Colors.primary}
-                              strokeWidth={2}
-                            />
-                          </View>
-                          <View style={styles.connectBody}>
-                            <Text style={styles.connectTitle}>
-                              Connect {msg.connectCta.toolName}
-                            </Text>
-                            <Text style={styles.connectSubtitle}>
-                              Complete authorization, then send done.
-                            </Text>
-                          </View>
-                          <TouchableOpacity
-                            style={styles.connectButton}
-                            onPress={() =>
-                              handleOpenConnectLink(
-                                msg.connectCta!.connectUrl,
-                                msg.connectCta!.toolName,
-                              )
-                            }
-                            activeOpacity={0.8}
-                          >
-                            <Text style={styles.connectButtonText}>
-                              Connect
-                            </Text>
-                          </TouchableOpacity>
-                        </View>
-                      ) : null}
-
-                      {!isUser && msg.browserPreview ? (
-                        <ChatBrowserPreview
-                          browserPreview={msg.browserPreview}
-                        />
-                      ) : null}
-
-                      {!isUser && msg.scheduleConfirmation ? (
-                        <View style={styles.scheduleCard}>
-                          <Text style={styles.scheduleTitle}>
-                            Schedule this task?
-                          </Text>
-                          <View style={styles.scheduleDetailRow}>
-                            <Text style={styles.scheduleLabel}>Task</Text>
-                            <Text style={styles.scheduleValue}>
-                              {msg.scheduleConfirmation.title}
-                            </Text>
-                          </View>
-                          <View style={styles.scheduleDetailRow}>
-                            <Text style={styles.scheduleLabel}>When</Text>
-                            <Text style={styles.scheduleValue}>
-                              {formatScheduleRule(
-                                msg.scheduleConfirmation.scheduleRule,
-                              )}
-                            </Text>
-                          </View>
-                          <View style={styles.scheduleDetailRow}>
-                            <Text style={styles.scheduleLabel}>Delivery</Text>
-                            <Text style={styles.scheduleValue}>
-                              {formatDeliveryLabel(
-                                msg.scheduleConfirmation.delivery,
-                              )}
-                            </Text>
-                          </View>
-                          <Text style={styles.scheduleSummary}>
-                            {msg.scheduleConfirmation.summary}
-                          </Text>
-
-                          {msg.scheduleError ? (
-                            <Text style={styles.scheduleError}>
-                              {msg.scheduleError}
-                            </Text>
-                          ) : null}
-
-                          <View style={styles.scheduleActions}>
-                            <TouchableOpacity
-                              style={[
-                                styles.scheduleButton,
-                                styles.schedulePrimaryButton,
-                                msg.scheduleStatus !== "pending" &&
-                                  styles.scheduleButtonDisabled,
-                              ]}
-                              disabled={msg.scheduleStatus !== "pending"}
-                              onPress={() => handleConfirmSchedule(msg.id)}
-                              activeOpacity={0.8}
-                            >
-                              <Text style={styles.schedulePrimaryButtonText}>
-                                {msg.scheduleStatus === "saving"
-                                  ? "Saving..."
-                                  : msg.scheduleStatus === "confirmed"
-                                    ? "Confirmed"
-                                    : "Confirm"}
+                        {!isUser && msg.connectCta ? (
+                          <View style={styles.connectCard}>
+                            <View style={styles.connectIcon}>
+                              <HugeiconsIcon
+                                icon={Link02Icon}
+                                size={20}
+                                color={Colors.primary}
+                                strokeWidth={2}
+                              />
+                            </View>
+                            <View style={styles.connectBody}>
+                              <Text style={styles.connectTitle}>
+                                Connect {msg.connectCta.toolName}
                               </Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity
-                              style={styles.scheduleButton}
-                              disabled={msg.scheduleStatus !== "pending"}
-                              onPress={() => handleEditSchedule(msg.id)}
-                              activeOpacity={0.8}
-                            >
-                              <Text style={styles.scheduleButtonText}>
-                                Edit
+                              <Text style={styles.connectSubtitle}>
+                                Complete authorization, then send done.
                               </Text>
-                            </TouchableOpacity>
+                            </View>
                             <TouchableOpacity
-                              style={styles.scheduleButton}
-                              disabled={msg.scheduleStatus !== "pending"}
-                              onPress={() => handleCancelSchedule(msg.id)}
+                              style={styles.connectButton}
+                              onPress={() =>
+                                handleOpenConnectLink(
+                                  msg.connectCta!.connectUrl,
+                                  msg.connectCta!.toolName,
+                                )
+                              }
                               activeOpacity={0.8}
                             >
-                              <Text style={styles.scheduleButtonText}>
-                                Cancel
+                              <Text style={styles.connectButtonText}>
+                                Connect
                               </Text>
                             </TouchableOpacity>
                           </View>
-                        </View>
-                      ) : null}
-                    </View>
-                  </TouchableOpacity>
-                );
-              })}
+                        ) : null}
 
-              {isSending && (
-                <Text
-                  style={{
-                    fontStyle: "italic",
-                    color: Colors.iconMuted,
-                    textAlign: "left",
-                    marginTop: 8,
-                  }}
-                >
-                  <ActivityIndicator /> AI is typing...
-                </Text>
+                        {!isUser && msg.browserPreview ? (
+                          <ChatBrowserPreview
+                            browserPreview={msg.browserPreview}
+                          />
+                        ) : null}
+
+                        {!isUser && msg.scheduleConfirmation ? (
+                          <View style={styles.scheduleCard}>
+                            <Text style={styles.scheduleTitle}>
+                              Schedule this task?
+                            </Text>
+                            <View style={styles.scheduleDetailRow}>
+                              <Text style={styles.scheduleLabel}>Task</Text>
+                              <Text style={styles.scheduleValue}>
+                                {msg.scheduleConfirmation.title}
+                              </Text>
+                            </View>
+                            <View style={styles.scheduleDetailRow}>
+                              <Text style={styles.scheduleLabel}>When</Text>
+                              <Text style={styles.scheduleValue}>
+                                {formatScheduleRule(
+                                  msg.scheduleConfirmation.scheduleRule,
+                                )}
+                              </Text>
+                            </View>
+                            <View style={styles.scheduleDetailRow}>
+                              <Text style={styles.scheduleLabel}>Delivery</Text>
+                              <Text style={styles.scheduleValue}>
+                                {formatDeliveryLabel(
+                                  msg.scheduleConfirmation.delivery,
+                                )}
+                              </Text>
+                            </View>
+                            <Text style={styles.scheduleSummary}>
+                              {msg.scheduleConfirmation.summary}
+                            </Text>
+
+                            {msg.scheduleError ? (
+                              <Text style={styles.scheduleError}>
+                                {msg.scheduleError}
+                              </Text>
+                            ) : null}
+
+                            <View style={styles.scheduleActions}>
+                              <TouchableOpacity
+                                style={[
+                                  styles.scheduleButton,
+                                  styles.schedulePrimaryButton,
+                                  msg.scheduleStatus !== "pending" &&
+                                    styles.scheduleButtonDisabled,
+                                ]}
+                                disabled={msg.scheduleStatus !== "pending"}
+                                onPress={() => handleConfirmSchedule(msg.id)}
+                                activeOpacity={0.8}
+                              >
+                                <Text style={styles.schedulePrimaryButtonText}>
+                                  {msg.scheduleStatus === "saving"
+                                    ? "Saving..."
+                                    : msg.scheduleStatus === "confirmed"
+                                      ? "Confirmed"
+                                      : "Confirm"}
+                                </Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity
+                                style={styles.scheduleButton}
+                                disabled={msg.scheduleStatus !== "pending"}
+                                onPress={() => handleEditSchedule(msg.id)}
+                                activeOpacity={0.8}
+                              >
+                                <Text style={styles.scheduleButtonText}>
+                                  Edit
+                                </Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity
+                                style={styles.scheduleButton}
+                                disabled={msg.scheduleStatus !== "pending"}
+                                onPress={() => handleCancelSchedule(msg.id)}
+                                activeOpacity={0.8}
+                              >
+                                <Text style={styles.scheduleButtonText}>
+                                  Cancel
+                                </Text>
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+                        ) : null}
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })
               )}
+
+              {isSending && agentActivity ? (
+                <AgentActivityIndicator activity={agentActivity} />
+              ) : null}
             </View>
           </TouchableWithoutFeedback>
         </ScrollView>
@@ -662,6 +765,7 @@ export default function ChatScreen() {
             <TextInput
               style={styles.textInput}
               value={inputText}
+              editable={!isLoadingMessages}
               onChangeText={setInputText}
               placeholder="Ask Cooper to read emails, send Slack msgs, or schedule meetings..."
               placeholderTextColor={Colors.iconMuted}
@@ -673,6 +777,7 @@ export default function ChatScreen() {
             {inputText.trim().length > 0 ? (
               <TouchableOpacity
                 style={[styles.circleBtn, styles.sendBtn]}
+                disabled={isLoadingMessages || isSending}
                 onPress={handleSend}
                 activeOpacity={0.8}
               >
@@ -701,6 +806,113 @@ export default function ChatScreen() {
         </View>
       </View>
     </KeyboardAvoidingView>
+  );
+}
+
+function ChatHistorySkeleton() {
+  return (
+    <View accessibilityLabel="Loading chat messages">
+      <View style={[styles.messageRow, styles.agentMessageRow]}>
+        <View
+          style={[styles.bubble, styles.agentBubble, styles.skeletonBubble]}
+        >
+          <View style={[styles.skeletonLine, styles.skeletonLineLong]} />
+          <View style={styles.skeletonLine} />
+          <View style={[styles.skeletonLine, styles.skeletonLineShort]} />
+        </View>
+      </View>
+      <View style={[styles.messageRow, styles.userMessageRow]}>
+        <View
+          style={[styles.bubble, styles.userBubble, styles.skeletonUserBubble]}
+        />
+      </View>
+      <View style={[styles.messageRow, styles.agentMessageRow]}>
+        <View
+          style={[
+            styles.bubble,
+            styles.agentBubble,
+            styles.skeletonShortBubble,
+          ]}
+        >
+          <View style={styles.skeletonLine} />
+          <View style={[styles.skeletonLine, styles.skeletonLineShort]} />
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function isAgentActivityStage(value: unknown): value is AgentActivityStage {
+  return (
+    value === "understanding_request" ||
+    value === "browsing_web" ||
+    value === "using_connected_tools" ||
+    value === "using_email" ||
+    value === "using_calendar" ||
+    value === "using_slack" ||
+    value === "processing_results" ||
+    value === "preparing_response"
+  );
+}
+
+const agentActivityLabels: Record<AgentActivityStage, string> = {
+  thinking: "Thinking",
+  understanding_request: "Understanding your request",
+  browsing_web: "Browsing the web",
+  using_connected_tools: "Working with connected tools",
+  using_email: "Working with your email",
+  using_calendar: "Working with your calendar",
+  using_slack: "Working with Slack",
+  processing_results: "Working with your results",
+  preparing_response: "Preparing your response",
+};
+
+function AgentActivityIndicator({
+  activity,
+}: {
+  activity: NonNullable<AgentActivity>;
+}) {
+  const statusOpacity = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    const transition = Animated.sequence([
+      Animated.timing(statusOpacity, {
+        toValue: 0.45,
+        duration: 90,
+        useNativeDriver: true,
+      }),
+      Animated.timing(statusOpacity, {
+        toValue: 1,
+        duration: 180,
+        useNativeDriver: true,
+      }),
+    ]);
+
+    transition.start();
+    return () => transition.stop();
+  }, [activity.current, statusOpacity]);
+
+  return (
+    <View style={[styles.messageRow, styles.agentMessageRow]}>
+      <View style={[styles.bubble, styles.agentBubble, styles.activityBubble]}>
+        {activity.completed.map((stage, index) => (
+          <View key={`${stage}-${index}`} style={styles.activityCompletedRow}>
+            <View style={styles.activityCompletedDot} />
+            <Text style={styles.activityCompletedText}>
+              {agentActivityLabels[stage]}
+            </Text>
+          </View>
+        ))}
+        <Animated.View
+          style={[styles.activityCurrentRow, { opacity: statusOpacity }]}
+        >
+          <ActivityIndicator size="small" color={Colors.iconMuted} />
+          <Text style={styles.activityText}>
+            {agentActivityLabels[activity.current]}
+          </Text>
+        </Animated.View>
+      </View>
+    </View>
   );
 }
 
@@ -762,6 +974,16 @@ const styles = StyleSheet.create({
   scrollInner: {
     flexGrow: 1,
   },
+  emptyChat: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 24,
+  },
+  emptyChatText: {
+    color: Colors.textSecondary,
+    fontSize: 15,
+  },
   dateBadgeContainer: {
     alignItems: "center",
     marginVertical: 14,
@@ -801,6 +1023,58 @@ const styles = StyleSheet.create({
   agentBubble: {
     backgroundColor: Colors.chatBubbleAi,
     borderBottomLeftRadius: 6,
+  },
+  skeletonBubble: {
+    width: "72%",
+    gap: 8,
+  },
+  skeletonShortBubble: {
+    width: "52%",
+    gap: 8,
+  },
+  skeletonUserBubble: {
+    width: "58%",
+    height: 52,
+    opacity: 0.5,
+  },
+  skeletonLine: {
+    height: 9,
+    width: "78%",
+    borderRadius: 5,
+    backgroundColor: Colors.border,
+  },
+  skeletonLineLong: {
+    width: "92%",
+  },
+  skeletonLineShort: {
+    width: "56%",
+  },
+  activityBubble: {
+    gap: 8,
+  },
+  activityCompletedRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 9,
+  },
+  activityCompletedDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: Colors.success,
+  },
+  activityCompletedText: {
+    color: Colors.textMuted,
+    fontSize: 12,
+  },
+  activityCurrentRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 9,
+  },
+  activityText: {
+    color: Colors.textSecondary,
+    fontSize: 13,
   },
   bubbleText: {
     fontSize: 15.5,
