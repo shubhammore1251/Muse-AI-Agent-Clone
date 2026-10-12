@@ -187,3 +187,48 @@
 //     true,
 //   );
 // });
+
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { planBrowserResearch } from "./browserResearchPlanner";
+
+test("planner forwards the task deadline signal to its request", async () => {
+  const abortController = new AbortController();
+  let observedSignal: AbortSignal | null | undefined;
+  const plan = {
+    goal: "Verify the latest match score",
+    entities: ["India", "West Indies"],
+    constraints: [],
+    missingInformation: [],
+    clarificationQuestion: null,
+    sources: [
+      {
+        name: "Score source",
+        url: "https://example.com/scorecard",
+        rationale: "Match details",
+      },
+    ],
+    searchQueries: ["India West Indies scorecard"],
+    comparisonCriteria: [],
+    completionCriteria: ["Verify teams and score"],
+    limitations: [],
+  };
+
+  await planBrowserResearch({
+    request: "Check the latest India versus West Indies score",
+    apiKey: "test-key",
+    signal: abortController.signal,
+    fetchImpl: async (_input, init) => {
+      observedSignal = init?.signal;
+      return new Response(
+        JSON.stringify({ output_text: JSON.stringify(plan) }),
+        {
+          status: 200,
+        },
+      );
+    },
+  });
+
+  assert.equal(observedSignal, abortController.signal);
+});

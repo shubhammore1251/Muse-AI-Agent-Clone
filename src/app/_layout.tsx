@@ -7,27 +7,30 @@
  * - StatusBar: dark icons on clean white surface
  */
 
-import React from 'react';
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
-import { Stack } from 'expo-router';
-import { StatusBar } from 'expo-status-bar';
-import { useColorScheme } from 'react-native';
-import { ToastProvider } from '@/context/ToastContext';
+import { ChatExportProvider } from "@/context/ChatExportContext";
+import { ToastProvider } from "@/context/ToastContext";
+import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from "expo-router";
+import { StatusBar } from "expo-status-bar";
+import { useColorScheme } from "react-native";
+import { KeyboardProvider } from "react-native-keyboard-controller";
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
 
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <ToastProvider>
-        <Stack screenOptions={{ headerShown: false, animation: 'fade' }}>
-          <Stack.Screen name="index" options={{ headerShown: false }} />
-          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-          <Stack.Screen name="home" options={{ headerShown: false }} />
-        </Stack>
-        <StatusBar style="dark" />
-      </ToastProvider>
-    </ThemeProvider>
+    <KeyboardProvider statusBarTranslucent navigationBarTranslucent>
+      <ThemeProvider value={colorScheme === "dark" ? DarkTheme : DefaultTheme}>
+        <ToastProvider>
+          <ChatExportProvider>
+            <Stack screenOptions={{ headerShown: false, animation: "fade" }}>
+              <Stack.Screen name="index" options={{ headerShown: false }} />
+              <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+              <Stack.Screen name="home" options={{ headerShown: false }} />
+            </Stack>
+            <StatusBar style="dark" />
+          </ChatExportProvider>
+        </ToastProvider>
+      </ThemeProvider>
+    </KeyboardProvider>
   );
 }
-

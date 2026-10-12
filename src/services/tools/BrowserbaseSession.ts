@@ -1,4 +1,4 @@
-import { safeErrorMessage } from "@/lib/agentLogger";
+import { logAgentEvent, safeErrorMessage } from "@/lib/agentLogger";
 import { createBrowser, GetBrowserbase } from "@/lib/browserbase";
 import { tool } from "@openai/agents";
 import { z } from "zod";
@@ -7,6 +7,7 @@ import {
   deleteBrowserSession,
   getBrowserSession,
   saveBrowserSession,
+  type StoredBrowserSession,
 } from "./browserSessionStore";
 
 const loginRequiredSchema = z.object({
@@ -20,92 +21,234 @@ const readResultSchema = z.object({
   result: z.string(),
 });
 
-export const createBrowserbaseSessionTool = tool({
-  name: "create_browser_session",
+const PAGE_OPERATION_TIMEOUT_MS = 30000;
+const SESSION_CLOSE_GRACE_MS = 1500;
+const sessionClosures = new Map<string, Promise<void>>();
 
-  description: `
-Create a live Browserbase cloud browser session and open the requested startUrl.
+export const STALE_FRAME_ERROR_PATTERN =
+  /Frame with the given frameId is not found|does not belong to the target|is not found/i;
 
-This tool only starts the browser and navigates to startUrl. It does not perform
-the user's task. Use browser_action and browser_read for each later step.
-After this tool returns, continue the workflow with browser_action/browser_read
-unless the user only asked to open the page.
+export function isStaleFrameError(error: unknown) {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : JSON.stringify(error ?? "");
+  return STALE_FRAME_ERROR_PATTERN.test(message);
+}
+
+export function isCacheRequestFailure(error: unknown) {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : JSON.stringify(error ?? "");
+
+  return /\/cache\/get.*status 413|status 413.*\/cache\/get|Cache read failed|status 413/i.test(
+    message,
+  );
+}
+
+export function isPageOperationTimeout(error: unknown) {
+  const message =
+    error instanceof Error
+      ? `${error.name} ${error.message}`
+      : String(error ?? "");
+  return /timed?\s*out|timeout/i.test(message);
+}
+
+export async function withPageOperationTimeout<T>(
+  operationName: string,
+  operation: () => Promise<T>,
+  timeoutMs = PAGE_OPERATION_TIMEOUT_MS,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${operationName} timed out after ${timeoutMs}ms.`));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([operation(), timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function refreshPageAfterStaleFrame(
+  browser: ReturnType<typeof getRequiredBrowserSession>["browser"],
+  currentPage?: Awaited<ReturnType<typeof getActivePageOrCreate>>,
+) {
+  const freshPage =
+    (await browser.context.activePage()) ??
+    (await browser.context.pages())[0] ??
+    currentPage;
+
+  return freshPage;
+}
+
+export async function withFreshStagehandPage<T>(
+  session: Pick<StoredBrowserSession, "browser" | "stagehand">,
+  operationName: string,
+  operation: (
+    page: Awaited<ReturnType<typeof getActivePageOrCreate>>,
+  ) => Promise<T>,
+  maxRetries = 1,
+): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    const page = await getActivePageOrCreate(session.browser);
+
+    try {
+      return await operation(page);
+    } catch (error) {
+      lastError = error;
+
+      if (!isStaleFrameError(error) || attempt >= maxRetries) {
+        throw error;
+      }
+
+      logAgentEvent(
+        "Browser stale-frame retry",
+        session.executionId || "browser",
+        {
+          operation: operationName,
+          attempt: attempt + 1,
+        },
+      );
+      await refreshPageAfterStaleFrame(session.browser, page).catch(
+        () => undefined,
+      );
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`${operationName} failed after retrying stale page state.`);
+}
+
+export function createBrowserbaseSessionTool(executionId?: string) {
+  let sessionCreation: Promise<Record<string, unknown>> | undefined;
+  let replacementUsed = false;
+
+  return tool({
+    name: "create_browser_session",
+
+    description: `
+Create the single live Browserbase cloud browser session for this research task.
+Return as soon as its live tab is ready so the user can watch. Then use
+browser_navigate to open startUrl and browser_read to inspect the page.
+
+This tool only starts the browser. It does not navigate or perform the task.
+Use browser_navigate, browser_action, and browser_read for later steps.
 `,
 
-  parameters: z.object({
-    reason: z.string(),
+    parameters: z.object({
+      reason: z.string(),
 
-    startUrl: z
-      .string()
-      .describe(
-        "A complete URL to open directly, for example https://google.com",
-      ),
+      startUrl: z
+        .string()
+        .describe(
+          "The first source URL to navigate to after the live preview is ready.",
+        ),
 
-    userRequest: z
-      .string()
-      .optional()
-      .describe(
-        "The full user task for context only. This tool must not execute it.",
-      ),
-  }),
+      userRequest: z
+        .string()
+        .optional()
+        .describe(
+          "The full user task for context only. This tool must not execute it.",
+        ),
+    }),
 
-  execute: async ({ reason, startUrl }) => {
-    let resources: Awaited<ReturnType<typeof createBrowser>> | undefined;
-    try {
-      resources = await createBrowser();
-      const { browser, stagehand } = resources;
-
-      const page = await getActivePageOrCreate(browser);
-      const navigation = await tryNavigateToAny(
-        page,
-        getStartUrlCandidates(startUrl),
-      );
-
-      const sessionId = browser.sessionId ?? "";
-
-      if (!sessionId) {
-        throw new Error("Browserbase did not return a session ID.");
-      }
-
-      saveBrowserSession(sessionId, {
-        browser,
-        stagehand,
-      });
-
-      const previewUrl = await getPreviewUrl(sessionId);
-      const currentUrl = await page.url();
-
-      return {
-        type: "browser_session",
-        status: "ready",
-        sessionId,
-        previewUrl,
-        currentUrl,
-        attemptedUrls: navigation.attemptedUrls,
-        reason,
-      };
-    } catch (error) {
-      const sessionId = resources?.browser.sessionId;
-      if (sessionId && getBrowserSession(sessionId)) {
-        await closeBrowserSession(sessionId).catch(() => undefined);
-      } else if (resources) {
-        await Promise.allSettled([
-          resources.stagehand.close(),
-          resources.browser.close(),
-        ]);
-        if (sessionId) {
-          await releaseBrowserbaseSession(sessionId).catch(() => undefined);
+    execute: async ({ reason, startUrl }) => {
+      if (sessionCreation) {
+        const previousSession = await sessionCreation;
+        const previousSessionId = String(previousSession.sessionId || "");
+        if (
+          previousSession.status !== "ready" ||
+          !previousSessionId ||
+          getBrowserSession(previousSessionId) ||
+          replacementUsed
+        ) {
+          return previousSession;
         }
+
+        replacementUsed = true;
+        sessionCreation = undefined;
       }
-      return {
-        type: "browser_session",
-        status: "failed",
-        error: safeErrorMessage(error),
-        reason,
-      };
-    }
-  },
-});
+
+      sessionCreation = (async () => {
+        const startedAt = Date.now();
+        let resources: Awaited<ReturnType<typeof createBrowser>> | undefined;
+        logAgentEvent(
+          "Browser session creation started",
+          executionId || "browser",
+        );
+        try {
+          resources = await createBrowser();
+          const { browser, stagehand } = resources;
+
+          const page = await getActivePageOrCreate(browser);
+          const sessionId = browser.sessionId ?? "";
+
+          if (!sessionId) {
+            throw new Error("Browserbase did not return a session ID.");
+          }
+
+          saveBrowserSession(sessionId, {
+            browser,
+            stagehand,
+            executionId,
+          });
+
+          const previewUrl = await getPreviewUrl(sessionId);
+          const currentUrl = await page.url();
+          logAgentEvent("Browser session ready", executionId || "browser", {
+            duration_ms: Date.now() - startedAt,
+            page_count: (await browser.context.pages()).length,
+          });
+
+          return {
+            type: "browser_session",
+            status: "ready",
+            sessionId,
+            previewUrl,
+            currentUrl,
+            requestedStartUrl: startUrl,
+            reason,
+          };
+        } catch (error) {
+          const sessionId = resources?.browser.sessionId;
+          if (sessionId && getBrowserSession(sessionId)) {
+            await closeBrowserSession(sessionId).catch(() => undefined);
+          } else if (resources) {
+            await Promise.allSettled([
+              resources.stagehand.close(),
+              resources.browser.close(),
+            ]);
+            if (sessionId) {
+              await releaseBrowserbaseSession(sessionId).catch(() => undefined);
+            }
+          }
+          return {
+            type: "browser_session",
+            status: "failed",
+            sessionId: resources?.browser.sessionId,
+            error: safeErrorMessage(error),
+            reason,
+          };
+        }
+      })();
+
+      return await sessionCreation;
+    },
+  });
+}
 
 export const browserNavigateTool = tool({
   name: "browser_navigate",
@@ -147,6 +290,9 @@ information. Try a direct URL, an alternate page, or a search URL before failing
         reason,
       };
     } catch (error) {
+      if (isPageOperationTimeout(error)) {
+        await closeBrowserSession(sessionId).catch(() => undefined);
+      }
       return {
         type: "browser_navigation_result",
         status: "failed",
@@ -165,7 +311,10 @@ export const browserActionTool = tool({
 Perform exactly one logical browser action in an existing Browserbase session.
 The OpenAI agent must break complex browser tasks into multiple calls.
 Use this to actually click, type, press keys, scroll, select options, and open
-links. Do not combine multiple actions into one instruction.
+links. For predictable actions, provide actionType and value; provide a CSS
+selector when known. If the target is uncertain, Stagehand observe() identifies
+it before the direct action. Leave actionType unset for semantic, self-healing
+Stagehand act() behavior. Do not combine multiple actions into one instruction.
 `,
 
   parameters: z.object({
@@ -175,45 +324,83 @@ links. Do not combine multiple actions into one instruction.
       .describe(
         'One browser action, such as "Click the Search field" or "Press Enter".',
       ),
+    actionType: z
+      .enum(["click", "type", "fill", "select", "scroll", "press"])
+      .optional(),
+    selector: z.string().optional(),
+    value: z.string().optional(),
   }),
 
-  execute: async ({ sessionId, instruction }) => {
+  execute: async ({ sessionId, instruction, actionType, selector, value }) => {
     try {
       const session = getRequiredBrowserSession(sessionId);
 
-      await session.stagehand.act(instruction);
+      const actionResult = await withFreshStagehandPage(
+        session,
+        "browser_action",
+        async (page) =>
+          await withPageOperationTimeout(
+            "browser_action",
+            () =>
+              actionType
+                ? performDirectBrowserAction({
+                    stagehand: session.stagehand,
+                    page,
+                    actionType,
+                    selector,
+                    value,
+                    instruction,
+                  })
+                : session.stagehand.act(instruction, {
+                    page,
+                    timeout: PAGE_OPERATION_TIMEOUT_MS,
+                  }),
+            PAGE_OPERATION_TIMEOUT_MS,
+          ),
+      );
 
       const page = await getActivePageOrCreate(session.browser);
       const currentUrl = await page.url();
       const previewUrl = await getPreviewUrl(sessionId);
-      const pageCheck = await checkLoginRequired(
-        session.stagehand,
-        instruction,
-      );
+      const loginCheck =
+        !actionResult.data.success ||
+        /\/(login|log-in|signin|sign-in|auth)(\/|\?|$)/i.test(currentUrl)
+          ? await checkLoginRequired(
+              session.stagehand,
+              instruction,
+              session.browser,
+            )
+          : undefined;
 
-      if (pageCheck.loginRequired) {
+      if (loginCheck?.loginRequired) {
         return {
           type: "browser_action_result",
           status: "login_required",
           actionObserved: false,
-          pageState: pageCheck.pageState,
+          pageState: loginCheck.pageState,
           sessionId,
           previewUrl,
           currentUrl,
-          message: pageCheck.message,
+          message: loginCheck.message,
         };
       }
 
+      const actionObserved = actionResult.data.success === true;
+
       return {
         type: "browser_action_result",
-        status: pageCheck.actionObserved ? "completed" : "not_verified",
-        actionObserved: pageCheck.actionObserved,
-        pageState: pageCheck.pageState,
+        status: actionObserved ? "completed" : "not_verified",
+        actionObserved,
+        pageState: actionResult.data.actionDescription,
         sessionId,
         previewUrl,
         currentUrl,
+        stagehandUsage: actionResult.metadata?.usage,
       };
     } catch (error) {
+      if (isPageOperationTimeout(error)) {
+        await closeBrowserSession(sessionId).catch(() => undefined);
+      }
       return {
         type: "browser_action_result",
         status: "failed",
@@ -224,6 +411,82 @@ links. Do not combine multiple actions into one instruction.
     }
   },
 });
+
+export async function performDirectBrowserAction({
+  stagehand,
+  page,
+  actionType,
+  selector,
+  value,
+  instruction,
+}: {
+  stagehand: ReturnType<typeof getRequiredBrowserSession>["stagehand"];
+  page: Awaited<ReturnType<typeof getActivePageOrCreate>>;
+  actionType: "click" | "type" | "fill" | "select" | "scroll" | "press";
+  selector?: string;
+  value?: string;
+  instruction: string;
+}) {
+  let targetSelector = selector?.trim();
+  const needsTarget = ["click", "type", "fill", "select"].includes(actionType);
+  let observationMetadata: any;
+
+  if (needsTarget && !targetSelector) {
+    const observation = await stagehand.observe(
+      `Find the page element required for this action: ${instruction}`,
+      { page, timeout: PAGE_OPERATION_TIMEOUT_MS },
+    );
+    targetSelector = observation.data[0]?.selector;
+    observationMetadata = observation.metadata;
+    if (!targetSelector) {
+      throw new Error("Stagehand could not identify a target element.");
+    }
+  }
+
+  if (["type", "fill", "select"].includes(actionType) && value === undefined) {
+    throw new Error(`A value is required for the ${actionType} action.`);
+  }
+
+  const locator = targetSelector ? page.locator(targetSelector) : undefined;
+  switch (actionType) {
+    case "click":
+      await locator!.click({ timeout: PAGE_OPERATION_TIMEOUT_MS });
+      break;
+    case "type":
+      await locator!.type(value!, { timeout: PAGE_OPERATION_TIMEOUT_MS });
+      break;
+    case "fill":
+      await locator!.fill(value!, { timeout: PAGE_OPERATION_TIMEOUT_MS });
+      break;
+    case "select":
+      await locator!.selectOption(value!, {
+        timeout: PAGE_OPERATION_TIMEOUT_MS,
+      });
+      break;
+    case "scroll":
+      if (locator) {
+        await locator.scrollTo(value || "100", {
+          timeout: PAGE_OPERATION_TIMEOUT_MS,
+        });
+      } else {
+        await page.evaluate("window.scrollBy(0, window.innerHeight)");
+      }
+      break;
+    case "press":
+      await page.keyPress(value || "Enter");
+      break;
+  }
+
+  return {
+    data: {
+      success: true,
+      message: "Browser action completed.",
+      actionDescription: `${actionType} ${targetSelector || "page"}`,
+      actions: [],
+    },
+    metadata: observationMetadata,
+  };
+}
 
 export const browserReadTool = tool({
   name: "browser_read",
@@ -246,9 +509,20 @@ the live browser.
     try {
       const session = getRequiredBrowserSession(sessionId);
 
-      const extraction = await session.stagehand.extract(
-        instruction,
-        readResultSchema as any,
+      const extraction = await withFreshStagehandPage(
+        session,
+        "browser_read",
+        async (page) => {
+          return await withPageOperationTimeout(
+            "browser_read",
+            () =>
+              session.stagehand.extract(instruction, readResultSchema as any, {
+                page,
+                timeout: PAGE_OPERATION_TIMEOUT_MS,
+              }),
+            PAGE_OPERATION_TIMEOUT_MS,
+          );
+        },
       );
 
       const page = await getActivePageOrCreate(session.browser);
@@ -263,11 +537,16 @@ the live browser.
         sessionId,
         currentUrl,
         result,
+        resultChars: result.length,
+        stagehandUsage: extraction.metadata.usage,
         message: hasUsefulResult
           ? undefined
           : "No useful data was extracted from the current page. Try another action, alternate URL, search result, or browser_navigate before answering.",
       };
     } catch (error) {
+      if (isPageOperationTimeout(error)) {
+        await closeBrowserSession(sessionId).catch(() => undefined);
+      }
       return {
         type: "browser_read_result",
         status: "failed",
@@ -300,27 +579,70 @@ export const closeBrowserTool = tool({
 });
 
 export async function closeBrowserSession(sessionId: string) {
-  const session = getBrowserSession(sessionId);
+  const pendingClosure = sessionClosures.get(sessionId);
+  if (pendingClosure) return await pendingClosure;
 
-  try {
+  const session = getBrowserSession(sessionId);
+  const closure = (async () => {
     if (session) {
-      await Promise.allSettled([
-        session.stagehand.close(),
-        session.browser?.close(),
+      let closeTimer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.allSettled([
+          session.stagehand.close(),
+          session.browser?.close(),
+        ]),
+        new Promise<void>((resolve) => {
+          closeTimer = setTimeout(resolve, SESSION_CLOSE_GRACE_MS);
+        }),
       ]);
+      if (closeTimer) clearTimeout(closeTimer);
     }
 
-    await releaseBrowserbaseSession(sessionId);
-  } finally {
+    const finalStatus = await releaseBrowserbaseSession(sessionId);
     deleteBrowserSession(sessionId);
+    if (session?.executionId) {
+      logAgentEvent("Browser session closure verified", session.executionId, {
+        status: finalStatus,
+      });
+    }
+  })();
+
+  sessionClosures.set(sessionId, closure);
+  try {
+    await closure;
+  } finally {
+    if (sessionClosures.get(sessionId) === closure) {
+      sessionClosures.delete(sessionId);
+    }
   }
 }
 
 async function releaseBrowserbaseSession(sessionId: string) {
-  await GetBrowserbase().sessions.update(sessionId, {
-    status: "REQUEST_RELEASE",
-    projectId: process.env.BROWSERBASE_PROJECT_ID,
-  });
+  const browserbase = GetBrowserbase();
+  await browserbase.sessions.update(
+    sessionId,
+    {
+      status: "REQUEST_RELEASE",
+      projectId: process.env.BROWSERBASE_PROJECT_ID,
+    },
+    { timeout: 1000 },
+  );
+
+  const closeDeadline = Date.now() + 8000;
+  let status = "unknown";
+
+  while (Date.now() < closeDeadline) {
+    const session = await browserbase.sessions.retrieve(sessionId, {
+      timeout: 1000,
+    });
+    status = session.status;
+    if (["COMPLETED", "TIMED_OUT", "ERROR"].includes(status)) return status;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  throw new Error(
+    `Browserbase session closure was not confirmed; final status was ${status}.`,
+  );
 }
 
 export async function closeBrowserSessions(sessionIds: Iterable<string>) {
@@ -338,17 +660,41 @@ export async function closeBrowserSessions(sessionIds: Iterable<string>) {
 export async function checkLoginRequired(
   stagehand: ReturnType<typeof getRequiredBrowserSession>["stagehand"],
   actionInstruction = "",
+  browser?: ReturnType<typeof getRequiredBrowserSession>["browser"],
 ) {
-  const extraction = await stagehand.extract(
-    `Inspect the current page after the preceding browser action.
+  const prompt = `Inspect the current page after the preceding browser action.
 
 Return loginRequired true only when login is required to continue, a credential
 page blocks progress, or an authentication challenge blocks the workflow.
 Do not return true merely because the page contains a Sign In, Log In, or Account button.
 Set actionObserved true only if the visible page state confirms this action occurred:
 ${actionInstruction || "No specific action was supplied."}
-Return a short pageState description without copying private page content.`,
+Return a short pageState description without copying private page content.`;
+
+  if (browser) {
+    const extraction = await withFreshStagehandPage(
+      { browser, stagehand },
+      "check_login_required",
+      async (page) => {
+        return await withPageOperationTimeout(
+          "check_login_required",
+          () =>
+            stagehand.extract(prompt, loginRequiredSchema as any, {
+              page,
+              timeout: PAGE_OPERATION_TIMEOUT_MS,
+            }),
+          PAGE_OPERATION_TIMEOUT_MS,
+        );
+      },
+    );
+
+    return extraction.data as z.infer<typeof loginRequiredSchema>;
+  }
+
+  const extraction = await stagehand.extract(
+    prompt,
     loginRequiredSchema as any,
+    { timeout: PAGE_OPERATION_TIMEOUT_MS },
   );
 
   return extraction.data as z.infer<typeof loginRequiredSchema>;
@@ -357,9 +703,20 @@ Return a short pageState description without copying private page content.`,
 async function getActivePageOrCreate(
   browser: ReturnType<typeof getRequiredBrowserSession>["browser"],
 ) {
-  return (
-    (await browser.context.activePage()) ?? (await browser.context.newPage())
+  const pages = await browser.context.pages();
+  const page =
+    (await browser.context.activePage()) ??
+    pages[0] ??
+    (await browser.context.newPage());
+
+  await browser.context.setActivePage(page);
+  await Promise.all(
+    pages
+      .filter((existingPage) => existingPage.pageId !== page.pageId)
+      .map((extraPage) => extraPage.close()),
   );
+
+  return page;
 }
 
 function getRequiredBrowserSession(sessionId: string) {
@@ -382,28 +739,22 @@ export async function tryNavigateToAny(
   page: Awaited<ReturnType<typeof getActivePageOrCreate>>,
   urls: string[],
 ) {
-  const attemptedUrls: string[] = [];
-  let lastError: unknown;
+  const url = urls[0];
+  if (!url) throw new Error("No navigation URL was supplied.");
 
-  for (const url of urls) {
-    attemptedUrls.push(url);
-
-    try {
-      await page.goto(url, {
+  await withPageOperationTimeout(
+    `browser_navigate:${url}`,
+    () =>
+      page.goto(url, {
         waitUntil: "domcontentloaded",
-      });
+        timeout: PAGE_OPERATION_TIMEOUT_MS,
+      }),
+    PAGE_OPERATION_TIMEOUT_MS,
+  );
 
-      return {
-        attemptedUrls,
-      };
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("Unable to navigate to any attempted URL.");
+  return {
+    attemptedUrls: [url],
+  };
 }
 
 export function getStartUrlCandidates(inputUrl: string) {

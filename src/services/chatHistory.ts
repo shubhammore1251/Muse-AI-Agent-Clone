@@ -1,6 +1,17 @@
 import { getApiUrl } from "@/lib/services";
 import { supabase } from "@/lib/supabase";
+import {
+  createChatMessagesPage,
+  DEFAULT_CHAT_MESSAGE_PAGE_SIZE,
+  normalizeChatMessagePageSize,
+  type ChatMessageCursor,
+  type ChatMessagesPage,
+} from "@/services/chatHistoryPagination";
 import axios from "axios";
+export type {
+  ChatMessageCursor,
+  ChatMessagesPage
+} from "@/services/chatHistoryPagination";
 
 export type ChatThreadType = "main" | "side";
 export type ChatMessageType = "user" | "assistant";
@@ -74,18 +85,36 @@ export const getLatestThread = async (userEmail: string) => {
   return data;
 };
 
-export const loadMessages = async (threadId: string) => {
-  const { data, error } = await supabase
+export const loadMessages = async (
+  threadId: string,
+  cursor: ChatMessageCursor | null = null,
+  pageSize = DEFAULT_CHAT_MESSAGE_PAGE_SIZE,
+): Promise<ChatMessagesPage> => {
+  const safePageSize = normalizeChatMessagePageSize(pageSize);
+  if (safePageSize === 0) {
+    return createChatMessagesPage([], safePageSize);
+  }
+
+  let query = supabase
     .from("chat_messages")
     .select("*")
     .eq("thread_id", threadId)
-    .order("created_at", { ascending: true });
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false });
+
+  if (cursor) {
+    query = query.or(
+      `created_at.lt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.lt.${cursor.id})`,
+    );
+  }
+
+  const { data, error } = await query.limit(safePageSize);
 
   if (error) {
     throw error;
   }
 
-  return data;
+  return createChatMessagesPage(data ?? [], safePageSize);
 };
 
 export const getAllUserThreads = async (userEmail: string) => {
@@ -100,6 +129,19 @@ export const getAllUserThreads = async (userEmail: string) => {
     throw error;
   }
 
+  return data;
+};
+
+export const clearThreadMessages = async (threadId: string) => {
+  if (!threadId)
+    throw new Error("A chat thread is required to clear messages.");
+
+  const { data, error } = await supabase
+    .from("chat_messages")
+    .delete()
+    .eq("thread_id", threadId);
+
+  if (error) throw error;
   return data;
 };
 

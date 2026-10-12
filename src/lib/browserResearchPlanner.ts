@@ -115,6 +115,7 @@ export async function planBrowserResearch({
   timezone,
   conversationContext,
   fetchImpl = fetch,
+  signal,
   apiKey = process.env.OPENAI_API_KEY,
   model = process.env.OPENAI_BROWSER_PLANNER_MODEL ||
     process.env.OPENAI_AGENT_MODEL ||
@@ -124,6 +125,7 @@ export async function planBrowserResearch({
   timezone?: string;
   conversationContext?: Array<{ role: string; text: string }>;
   fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
   apiKey?: string;
   model?: string;
 }): Promise<BrowserResearchPlan> {
@@ -160,6 +162,7 @@ export async function planBrowserResearch({
         },
       },
     }),
+    signal,
   });
 
   const responseText = await response.text();

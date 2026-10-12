@@ -17,6 +17,8 @@ export interface ChatMessage {
   text: string;
   /** Formatted timestamp display string (e.g. "3:35 PM") */
   timestamp: string;
+  /** Original creation time used for grouping messages by date */
+  createdAt?: string;
 
   browserPreview?: BrowserSessionToolOutput;
   connectCta?: {

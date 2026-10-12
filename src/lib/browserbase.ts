@@ -56,21 +56,59 @@ export const createBrowser = async () => {
     keepAlive: false,
   });
 
-  const stagehand = await Stagehand.create({
-    browser,
+  try {
+    const stagehand = await Stagehand.create({
+      browser,
 
-    model: {
-      modelName: "openai/gpt-5-nano",
-      apiKey: openaiApiKey,
-    },
+      model: {
+        modelName: "openai/gpt-5-nano",
+        apiKey: openaiApiKey,
+      },
 
-    selfHeal: true,
-  });
+      cache: false,
+      selfHeal: true,
+    });
 
-  return {
-    browser,
-    stagehand,
-  };
+    return {
+      browser,
+      stagehand,
+    };
+  } catch (error) {
+    await browser.close().catch(() => undefined);
+    const sessionId = browser.sessionId;
+    if (sessionId) {
+      const client = new Browserbase({ apiKey });
+      await client.sessions.update(
+        sessionId,
+        { status: "REQUEST_RELEASE", projectId },
+        { timeout: 1000 },
+      );
+
+      const closeDeadline = Date.now() + 8000;
+      let closureVerified = false;
+      while (Date.now() < closeDeadline) {
+        const session = await client.sessions.retrieve(sessionId, {
+          timeout: 1000,
+        });
+        if (["COMPLETED", "TIMED_OUT", "ERROR"].includes(session.status)) {
+          closureVerified = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+
+      if (!closureVerified) {
+        throw Object.assign(
+          new Error(
+            "Browserbase did not confirm session closure after Stagehand initialization failed.",
+            { cause: error },
+          ),
+          { sessionId },
+        );
+      }
+    }
+    throw error;
+  }
 };
 
 function findStagehandPackagePath() {

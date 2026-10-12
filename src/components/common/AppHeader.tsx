@@ -15,6 +15,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react-native";
 import React from "react";
 import {
+  LayoutChangeEvent,
   Platform,
   StyleSheet,
   Text,
@@ -30,6 +31,12 @@ export interface AppHeaderProps {
   mascotIcon?: string;
   /** Accent aura color */
   mascotColor?: string;
+  /** Current thread label, such as Main Chat or a side-chat title */
+  chatContextLabel?: string;
+  /** Whether the current thread is a side chat */
+  chatContextIsSide?: boolean;
+  /** Reports the rendered header height for keyboard positioning */
+  onLayout?: (event: LayoutChangeEvent) => void;
   /** Callback to open the left sliding session drawer */
   onOpenSidebar: () => void;
   /** Callback to trigger the right 3-dots actions menu */
@@ -45,12 +52,15 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
   agentName = "Cooper",
   mascotIcon = "cooper",
   mascotColor = Colors.primary,
+  chatContextLabel = "Main Chat",
+  chatContextIsSide = false,
+  onLayout,
   onOpenSidebar,
   onOpenSettings,
   onMascotPress,
 }) => {
   return (
-    <View style={styles.headerContainer}>
+    <View style={styles.headerContainer} onLayout={onLayout}>
       {/* Left Action: Circular White Button with 2 lines and Blue Status Dot */}
       <View style={styles.sideCol}>
         <TouchableOpacity
@@ -86,6 +96,27 @@ export const AppHeader: React.FC<AppHeaderProps> = ({
         {/* Floating Capsule Name Pill */}
         <View style={styles.nameCapsule}>
           <Text style={styles.agentNameText}>{agentName}</Text>
+          <View style={styles.nameCapsuleDivider} />
+          <View
+            style={styles.chatContextBadge}
+            accessibilityLabel={chatContextLabel}
+          >
+            <View
+              style={[
+                styles.chatContextDot,
+                chatContextIsSide
+                  ? styles.sideChatContextDot
+                  : styles.mainChatContextDot,
+              ]}
+            />
+            <Text
+              style={styles.chatContextText}
+              numberOfLines={1}
+              ellipsizeMode="tail"
+            >
+              {chatContextLabel}
+            </Text>
+          </View>
         </View>
       </TouchableOpacity>
 
@@ -165,6 +196,8 @@ const styles = StyleSheet.create({
     borderColor: Colors.white,
   },
   centerCol: {
+    maxWidth: "62%",
+    flexShrink: 1,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -173,8 +206,11 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   nameCapsule: {
+    maxWidth: "100%",
+    flexDirection: "row",
+    alignItems: "center",
     backgroundColor: Colors.white,
-    paddingHorizontal: 16,
+    paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 20,
     marginTop: 4,
@@ -198,6 +234,35 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: Colors.iconDark,
     letterSpacing: -0.2,
+  },
+  nameCapsuleDivider: {
+    width: 1,
+    height: 14,
+    marginHorizontal: 7,
+    backgroundColor: Colors.border,
+  },
+  chatContextBadge: {
+    maxWidth: "58%",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+  },
+  chatContextDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  mainChatContextDot: {
+    backgroundColor: Colors.primary,
+  },
+  sideChatContextDot: {
+    backgroundColor: Colors.success,
+  },
+  chatContextText: {
+    flexShrink: 1,
+    color: Colors.textSecondary,
+    fontSize: 11,
+    fontWeight: "600",
   },
 });
 

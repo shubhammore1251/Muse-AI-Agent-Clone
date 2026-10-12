@@ -3,6 +3,7 @@ import type { Stagehand, StagehandBrowser } from "@browserbasehq/stagehand";
 export type StoredBrowserSession = {
   browser: StagehandBrowser;
   stagehand: Stagehand;
+  executionId?: string;
 };
 
 const browserSessions = new Map<string, StoredBrowserSession>();

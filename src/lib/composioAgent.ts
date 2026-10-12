@@ -1,19 +1,19 @@
 import {
-  createExecutionId,
-  logAgentEvent,
-  safeErrorMessage,
+    createExecutionId,
+    logAgentEvent,
+    safeErrorMessage,
 } from "@/lib/agentLogger";
 import {
-  BrowserResearchPlan,
-  formatBrowserPlanForAgent,
+    BrowserResearchPlan,
+    formatBrowserPlanForAgent,
 } from "@/lib/browserResearchPlanner";
 import { getSupabaseAdminClient } from "@/lib/composioBackend";
 import {
-  browserActionTool,
-  browserNavigateTool,
-  browserReadTool,
-  closeBrowserTool,
-  createBrowserbaseSessionTool,
+    browserActionTool,
+    browserNavigateTool,
+    browserReadTool,
+    closeBrowserTool,
+    createBrowserbaseSessionTool,
 } from "@/services/tools/BrowserbaseSession";
 import { ChatMessage } from "@/types";
 import { Composio } from "@composio/core";
@@ -166,7 +166,7 @@ export async function createCooperAgentForUser(
 
   const browserPlanInstructions = browserPlan
     ? `\n\nBROWSER RESEARCH PLAN (execute this plan; it is not a user-facing answer):\n${formatBrowserPlanForAgent(browserPlan)}\n\n` +
-      "Use the plan's sources and focused searchQueries instead of searching the whole original request verbatim. Start one Browserbase session on the first relevant source, then use browser_read to inspect it. Execute focused queries using the site's search/filter controls or a suitable search URL; do not paste the whole request as one query. When the plan selects multiple sources or compares options, gather observed page evidence from at least two distinct sources where accessible. Use one browser_action per action and inspect the resulting page with browser_read before proceeding. If a page is loading, wait briefly using a browser action and inspect again. Dismiss only nonessential cookie-consent banners when needed; do not accept signups or account terms. Verify that interactions changed the page; if not, inspect and try one reasonable alternate action or source. Collect only facts observed on pages, retain actual source URLs for citations, and compare using the listed criteria when applicable. Continue until the completionCriteria are met or the remaining limitations block progress. Do not invent results or claim a source was checked when it was not. Never log in, bypass CAPTCHA, commit a booking, or pay. If evidence is unavailable, say so and explain which source or constraint could not be verified."
+      "Use the plan's sources and focused searchQueries instead of searching the whole original request verbatim. Start one Browserbase session and immediately navigate its single tab to the first relevant source before using browser_read. Execute focused queries using the site's search/filter controls or a suitable search URL; do not paste the whole request as one query. When the plan selects multiple sources or compares options, navigate sequentially in the same tab and gather observed page evidence from at least two distinct sources where accessible. Use one browser_action per action and inspect the resulting page with browser_read before proceeding. If a page is loading, wait briefly using a browser action and inspect again. Dismiss only nonessential cookie-consent banners when needed; do not accept signups or account terms. Verify that interactions changed the page; if not, inspect and try one reasonable alternate action or source. Collect only facts observed on pages, retain actual source URLs for citations, and compare using the listed criteria when applicable. Continue until the completionCriteria are met or the remaining limitations block progress. Do not invent results or claim a source was checked when it was not. Never log in, bypass CAPTCHA, commit a booking, or pay. If evidence is unavailable, say so and explain which source or constraint could not be verified."
     : "";
 
   return new Agent({
@@ -174,7 +174,8 @@ export async function createCooperAgentForUser(
     instructions:
       "You are Cooper, a personal AI assistant inside Muse AI. " +
       "Use Browserbase browser tools when the user asks you to visit, open, search, inspect, or interact with a website, or when the answer depends on current website content, product availability, prices, login pages, forms, booking, checkout, or browser automation. " +
-      "For browser tasks, call create_browser_session once, inspect the page with browser_read, then continue with browser_action or browser_navigate until the original user goal is complete. Opening a page is not complete unless the user only asked to open it. " +
+      "For browser tasks, call create_browser_session once, then immediately call browser_navigate to open its requested source and inspect it with browser_read. Reuse that session and tab for every later source and action. Opening a page is not complete unless the user only asked to open it. " +
+      "For predictable clicks, typing, form fills, selection, scrolling, or key presses, use browser_action with actionType and value; pass a known CSS selector, or omit it so Stagehand observe() can identify the element. Use semantic browser_action instructions without actionType when the interaction is ambiguous and Stagehand act() self-healing is needed. " +
       "Do not call close_browser yourself; the chat server pauses Browserbase sessions after the final answer is sent. " +
       "If login blocks progress, ask the user to log in in the live browser, keep the session open, and do not ask for passwords. " +
       "Use Composio tools for connected app workflows such as email, calendar, Slack, Notion, or other workspace data. " +
@@ -187,7 +188,7 @@ export async function createCooperAgentForUser(
     model: process.env.OPENAI_AGENT_MODEL || "gpt-5-nano",
     tools: [
       ...composioTools,
-      createBrowserbaseSessionTool,
+      createBrowserbaseSessionTool(executionId),
       browserNavigateTool,
       browserActionTool,
       browserReadTool,

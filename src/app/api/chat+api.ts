@@ -17,6 +17,7 @@ import {
   parseToolOutput,
 } from "@/lib/composioAgent";
 import { validateUserFromRequest } from "@/lib/composioBackend";
+import { buildConversationContext } from "@/lib/contextMemoryService";
 import {
   classifyUserIntent,
   parseScheduleIntentWithAgent,
@@ -24,22 +25,40 @@ import {
 import { closeBrowserSessions } from "@/services/tools/BrowserbaseSession";
 import { AgentInputItem, run } from "@openai/agents";
 
+const TASK_DEADLINE_MS = 4 * 60 * 1000 + 45 * 1000;
+
 export async function POST(req: Request) {
   const executionId = createExecutionId();
   const requestStartedAt = Date.now();
+  const taskAbortController = new AbortController();
+  const deadlineTimer = setTimeout(() => {
+    taskAbortController.abort(new Error("Research task deadline reached."));
+  }, TASK_DEADLINE_MS);
   let reqBody: any = {};
   try {
-    reqBody = await req.json();
+    reqBody = await withAbortSignal(req.json(), taskAbortController.signal);
   } catch {
     reqBody = {};
   }
 
-  const { messages = [], timezone } = reqBody;
+  const requestMessages = Array.isArray(reqBody.messages)
+    ? reqBody.messages
+    : [];
+  let messages = requestMessages;
+  let promptMessages = requestMessages;
+  const { timezone } = reqBody;
 
   let activeUserId: string | null = null;
+  let activeUserEmail: string | null = null;
+  let activeAccessToken: string | null = null;
   try {
-    const userAuth = await validateUserFromRequest(req, reqBody.userId);
+    const userAuth = await withAbortSignal(
+      validateUserFromRequest(req, reqBody.userId),
+      taskAbortController.signal,
+    );
     activeUserId = userAuth.userId;
+    activeUserEmail = userAuth.userEmail ?? null;
+    activeAccessToken = userAuth.token ?? null;
   } catch {
     activeUserId = reqBody.userId || null;
   }
@@ -52,9 +71,26 @@ export async function POST(req: Request) {
       };
 
       const browserSessionIds = new Set<string>();
+      const verifiedPageEvidence: Array<{ url: string; result: string }> = [];
+      let deadlineCleanup: Promise<void> | undefined;
+      const onTaskDeadline = () => {
+        logAgentEvent("Task deadline reached", executionId, {
+          duration_ms: Date.now() - requestStartedAt,
+          verified_page_reads: verifiedPageEvidence.length,
+        });
+        deadlineCleanup = closeBrowserSessions(browserSessionIds).then(() => {
+          browserSessionIds.clear();
+        });
+      };
+      taskAbortController.signal.addEventListener("abort", onTaskDeadline, {
+        once: true,
+      });
+      if (taskAbortController.signal.aborted) onTaskDeadline();
       let loginRequired = false;
       let toolCallCount = 0;
       let toolSequence = 0;
+      let firstBrowserActionReported = false;
+      let agentModelTurns = 0;
       const activeToolCalls = new Map<
         string,
         { name: string; startedAt: number }
@@ -87,6 +123,30 @@ export async function POST(req: Request) {
 
       try {
         send({ type: "activity", activity: "understanding_request" });
+        const requestCurrentMessage = [...requestMessages]
+          .reverse()
+          .find(
+            (message: any) =>
+              message?.sender === "user" && typeof message?.text === "string",
+          );
+        if (requestCurrentMessage) {
+          const context = await buildConversationContext({
+            userId: activeUserId,
+            userEmail: activeUserEmail,
+            accessToken: activeAccessToken,
+            threadId:
+              typeof reqBody.threadId === "string" ? reqBody.threadId : null,
+            currentMessage: {
+              id: String(requestCurrentMessage.id || "current-request"),
+              role: "user",
+              content: requestCurrentMessage.text,
+              created_at: requestCurrentMessage.created_at,
+            },
+            fallbackMessages: requestMessages,
+          });
+          messages = context.conversationMessages;
+          promptMessages = context.promptMessages;
+        }
         const latestUserMessage = [...messages]
           .reverse()
           .find(
@@ -178,6 +238,7 @@ export async function POST(req: Request) {
             request: resolvedRequestText,
             timezone,
             conversationContext: browserFollowUp?.conversationContext,
+            signal: taskAbortController.signal,
           });
           logAgentEvent("Execution plan created", executionId, {
             action: "browser_research",
@@ -215,9 +276,10 @@ export async function POST(req: Request) {
           executionId,
           browserPlan,
         );
-        let result = await run(agent, mapMessages(messages), {
+        let result = await run(agent, mapMessages(promptMessages), {
           stream: true,
           maxTurns: 30,
+          signal: taskAbortController.signal,
         });
         let output = "";
         let continuationAttempt = 0;
@@ -269,9 +331,7 @@ export async function POST(req: Request) {
                 tool: toolName,
               });
 
-              if (
-                /^(create_browser_session|browser_navigate)$/i.test(toolName)
-              ) {
+              if (/^browser_navigate$/i.test(toolName)) {
                 let toolArguments: any = rawItem?.arguments;
                 if (typeof toolArguments === "string") {
                   try {
@@ -289,7 +349,8 @@ export async function POST(req: Request) {
 
               send({
                 type: "activity",
-                activity: getToolActivityStage(toolName),
+                activity: getToolActivityStage(toolName, rawItem?.arguments),
+                detail: getToolActivityDetail(toolName, rawItem?.arguments),
               });
               continue;
             }
@@ -354,17 +415,28 @@ export async function POST(req: Request) {
               });
             }
 
-            if (
-              /^(create_browser_session|browser_navigate)$/i.test(outputName)
-            ) {
+            if (/^create_browser_session$/i.test(outputName)) {
+              logAgentEvent("Browser session preview ready", executionId, {
+                page: safeDomain(output?.currentUrl),
+                time_to_preview_ms: Date.now() - requestStartedAt,
+                status: output?.status || "unknown",
+              });
+            } else if (/^browser_navigate$/i.test(outputName)) {
               logAgentEvent("Browser navigation completed", executionId, {
                 destination: safeDomain(output?.currentUrl),
                 status: output?.status || "completed",
+                attempted_urls: Array.isArray(output?.attemptedUrls)
+                  ? output.attemptedUrls.length
+                  : undefined,
               });
             } else if (/^browser_read$/i.test(outputName)) {
               logAgentEvent("Browser page inspected", executionId, {
                 page: safeDomain(output?.currentUrl),
                 status: output?.status || "completed",
+                result_chars: output?.resultChars,
+                model_inference_ms: output?.stagehandUsage?.inferenceTimeMs,
+                model_input_tokens: output?.stagehandUsage?.inputTokens,
+                model_output_tokens: output?.stagehandUsage?.outputTokens,
               });
               if (
                 output?.status === "completed" &&
@@ -374,12 +446,27 @@ export async function POST(req: Request) {
                 usefulBrowserReads += 1;
                 const domain = safeDomain(output.currentUrl);
                 if (domain !== "unknown") browserEvidenceDomains.add(domain);
+                verifiedPageEvidence.push({
+                  url: String(output.currentUrl || "unknown"),
+                  result: output.result.trim().slice(0, 1200),
+                });
               }
             } else if (/^browser_action$/i.test(outputName)) {
+              const firstActionDetails = firstBrowserActionReported
+                ? {}
+                : {
+                    time_to_first_visible_interaction_ms:
+                      Date.now() - requestStartedAt,
+                  };
+              firstBrowserActionReported = true;
               logAgentEvent("Browser action verified", executionId, {
                 page: safeDomain(output?.currentUrl),
                 observed: output?.actionObserved === true,
                 status: output?.status || "unknown",
+                model_inference_ms: output?.stagehandUsage?.inferenceTimeMs,
+                model_input_tokens: output?.stagehandUsage?.inputTokens,
+                model_output_tokens: output?.stagehandUsage?.outputTokens,
+                ...firstActionDetails,
               });
             }
 
@@ -407,6 +494,7 @@ export async function POST(req: Request) {
           }
 
           await result.completed;
+          agentModelTurns += result.currentTurn;
           output = result.finalOutput ?? "";
 
           const requiredSources = browserPlan
@@ -439,7 +527,7 @@ export async function POST(req: Request) {
           send({ type: "activity", activity: "browsing_web" });
 
           const continuationMessages: AgentInputItem[] = [
-            ...mapMessages(messages),
+            ...mapMessages(promptMessages),
             {
               role: "assistant",
               status: "completed",
@@ -460,12 +548,41 @@ export async function POST(req: Request) {
           result = await run(agent, continuationMessages, {
             stream: true,
             maxTurns: 20,
+            signal: taskAbortController.signal,
           });
         }
 
         if (browserPlan) {
           const requiredSources =
             getRequiredBrowserResearchSources(browserPlan);
+          const plannedDomains = browserPlan.sources
+            .map(({ url }) => safeDomain(url))
+            .filter((domain) => domain !== "unknown");
+          const skippedDomains = plannedDomains.filter(
+            (domain) => !browserEvidenceDomains.has(domain),
+          );
+          const unsupportedCitations = getLinkedDomains(output).filter(
+            (domain) => !browserEvidenceDomains.has(domain),
+          );
+
+          logAgentEvent("Research source coverage", executionId, {
+            planned_sources: plannedDomains.join(",") || "none",
+            visited_sources: [...browserEvidenceDomains].join(",") || "none",
+            skipped_sources: skippedDomains.join(",") || "none",
+          });
+
+          if (skippedDomains.length || unsupportedCitations.length) {
+            const warnings = [
+              skippedDomains.length
+                ? `Planned sources not inspected: ${skippedDomains.join(", ")}.`
+                : "",
+              unsupportedCitations.length
+                ? `These cited domains were not verified in the live browser: ${unsupportedCitations.join(", ")}.`
+                : "",
+            ].filter(Boolean);
+            output = `${output}${output ? "\n\n" : ""}Source verification note: ${warnings.join(" ")}`;
+          }
+
           if (
             !loginRequired &&
             !hasSufficientBrowserResearchEvidence(
@@ -494,6 +611,7 @@ export async function POST(req: Request) {
         logAgentEvent("Final response generated", executionId, {
           status: "success",
           response_chars: output.length,
+          agent_model_turns: agentModelTurns,
           duration_ms: Date.now() - requestStartedAt,
         });
         send({
@@ -515,12 +633,33 @@ export async function POST(req: Request) {
           duration_ms: Date.now() - requestStartedAt,
           error: safeErrorMessage(error),
         });
-        send({
-          type: "error",
-          message: getAgentErrorMessage(error),
-        });
+        if (taskAbortController.signal.aborted) {
+          const partialResults = verifiedPageEvidence
+            .slice(0, 5)
+            .map(({ url, result: evidence }) => `Source: ${url}\n${evidence}`)
+            .join("\n\n");
+          send({
+            type: "final",
+            output: `The research time budget was reached. ${partialResults ? `Verified partial results:\n\n${partialResults}` : "I could not verify useful page results before the deadline."}`,
+          });
+        } else {
+          send({
+            type: "error",
+            message: getAgentErrorMessage(error),
+          });
+        }
       } finally {
-        if (!loginRequired && browserSessionIds.size > 0) {
+        clearTimeout(deadlineTimer);
+        taskAbortController.signal.removeEventListener("abort", onTaskDeadline);
+        if (deadlineCleanup) {
+          try {
+            await deadlineCleanup;
+          } catch (closeError) {
+            logAgentEvent("Browser session close failed", executionId, {
+              error: safeErrorMessage(closeError),
+            });
+          }
+        } else if (!loginRequired && browserSessionIds.size > 0) {
           try {
             await closeBrowserSessions(browserSessionIds);
           } catch (closeError) {
@@ -541,6 +680,26 @@ export async function POST(req: Request) {
       "Cache-Control": "no-cache",
     },
   });
+}
+
+async function withAbortSignal<T>(promise: Promise<T>, signal: AbortSignal) {
+  if (signal.aborted) {
+    throw signal.reason ?? new Error("Request deadline reached.");
+  }
+
+  let removeAbortListener: () => void = () => {};
+  const aborted = new Promise<never>((_, reject) => {
+    const onAbort = () =>
+      reject(signal.reason ?? new Error("Request deadline reached."));
+    signal.addEventListener("abort", onAbort, { once: true });
+    removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+  });
+
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    removeAbortListener();
+  }
 }
 
 function getToolIntegration(toolName: unknown) {
@@ -605,10 +764,35 @@ function resolveBrowserResearchFollowUp(
   };
 }
 
-function getToolActivityStage(toolName: unknown) {
+function getToolActivityStage(toolName: unknown, toolArguments?: unknown) {
   if (typeof toolName !== "string") return "using_connected_tools";
 
   const normalizedName = toolName.toLowerCase();
+  const argumentText =
+    typeof toolArguments === "string"
+      ? toolArguments
+      : toolArguments && typeof toolArguments === "object"
+        ? JSON.stringify(toolArguments)
+        : "";
+
+  if (/^browser_navigate$/.test(normalizedName)) {
+    return "opening_source";
+  }
+  if (/^create_browser_session$/.test(normalizedName)) {
+    return "browsing_web";
+  }
+  if (/browser_action/.test(normalizedName)) {
+    if (/scroll/i.test(argumentText)) return "scrolling_page";
+    if (/type|fill|enter text/i.test(argumentText)) return "typing_in_page";
+    if (/click|press|select/i.test(argumentText)) return "clicking_page";
+    if (/search|query/i.test(argumentText)) return "searching_web";
+    if (/compare/i.test(argumentText)) return "comparing_options";
+    if (/open|inspect|details/i.test(argumentText)) return "inspecting_details";
+    return "searching_web";
+  }
+  if (/browser_read/.test(normalizedName)) {
+    return "reading_results";
+  }
   if (/browser|web[_-]?search|search[_-]?web/.test(normalizedName)) {
     return "browsing_web";
   }
@@ -616,6 +800,49 @@ function getToolActivityStage(toolName: unknown) {
   if (/calendar/.test(normalizedName)) return "using_calendar";
   if (/slack/.test(normalizedName)) return "using_slack";
   return "using_connected_tools";
+}
+
+function getToolActivityDetail(toolName: unknown, toolArguments?: unknown) {
+  const normalizedName = String(toolName || "").toLowerCase();
+  let argumentsValue = toolArguments;
+  if (typeof argumentsValue === "string") {
+    try {
+      argumentsValue = JSON.parse(argumentsValue);
+    } catch {
+      argumentsValue = {};
+    }
+  }
+
+  const args =
+    argumentsValue && typeof argumentsValue === "object"
+      ? (argumentsValue as Record<string, unknown>)
+      : {};
+
+  if (normalizedName === "browser_navigate") {
+    const destination = safeDomain(args.url);
+    return destination === "unknown"
+      ? "Opening source"
+      : `Opening ${destination}`;
+  }
+  if (normalizedName === "create_browser_session")
+    return "Starting live browser";
+  if (normalizedName === "browser_read") return "Inspecting visible results";
+  if (normalizedName === "browser_action") {
+    const instruction = String(args.instruction || "");
+    if (/scroll/i.test(instruction)) return "Scrolling page";
+    if (/type|fill|enter text/i.test(instruction)) return "Typing in page";
+    if (/click|press|select/i.test(instruction)) return "Clicking page";
+    if (/search|query/i.test(instruction)) return "Searching the web";
+    return "Inspecting page details";
+  }
+  return undefined;
+}
+
+function getLinkedDomains(text: string) {
+  const urls = text.match(/https?:\/\/[^\s)\]>]+/gi) || [];
+  return [
+    ...new Set(urls.map(safeDomain).filter((domain) => domain !== "unknown")),
+  ];
 }
 
 function getAgentErrorMessage(error: unknown) {

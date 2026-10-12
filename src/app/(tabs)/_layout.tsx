@@ -14,32 +14,60 @@
  */
 
 import {
-    AppHeader,
-    EditAgentModal,
-    SettingsMenuModal,
-    SidebarDrawer,
+  AppHeader,
+  EditAgentModal,
+  SettingsMenuModal,
+  SidebarDrawer,
 } from "@/components/common";
 import { Colors } from "@/constants/colors";
+import { useChatExport } from "@/context/ChatExportContext";
 import { showToast } from "@/context/ToastContext";
 import {
-    CheckmarkSquare02Icon,
-    Comment01Icon,
-    File01Icon,
-    Idea01Icon,
-    Settings02Icon,
+  CheckmarkSquare02Icon,
+  Comment01Icon,
+  File01Icon,
+  Idea01Icon,
+  Settings02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react-native";
-import { Tabs, useRouter } from "expo-router";
+import {
+  Tabs,
+  useGlobalSearchParams,
+  usePathname,
+  useRouter,
+} from "expo-router";
 import { useState } from "react";
 import { Platform, StyleSheet, View } from "react-native";
 import {
-    SafeAreaView,
-    useSafeAreaInsets,
+  SafeAreaView,
+  useSafeAreaInsets,
 } from "react-native-safe-area-context";
 
 export default function TabLayout() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { requestChatAction, chatHeaderIdentity, setAppHeaderHeight } =
+    useChatExport();
+  const pathname = usePathname();
+  const { chatType, sideChatThreadId } = useGlobalSearchParams<{
+    chatType?: string;
+    sideChatThreadId?: string;
+  }>();
+  const requestedThreadId =
+    typeof sideChatThreadId === "string" ? sideChatThreadId : null;
+  const identityMatchesRoute =
+    requestedThreadId !== null &&
+    chatHeaderIdentity.threadId === requestedThreadId;
+  const isSideChat = identityMatchesRoute
+    ? chatHeaderIdentity.type === "side"
+    : chatType === "side";
+  const chatContextLabel = isSideChat
+    ? identityMatchesRoute && chatHeaderIdentity.type === "side"
+      ? chatHeaderIdentity.title.trim() || "Side Chat"
+      : "Side Chat"
+    : "Main Chat";
+  const showChatManagement = pathname.endsWith("/chat");
+  const isMainChat = !isSideChat;
 
   // Agent mascot & profile state
   const [agentName, setAgentName] = useState("Cooper");
@@ -59,6 +87,11 @@ export default function TabLayout() {
         agentName={agentName}
         mascotIcon={mascotIcon}
         mascotColor={mascotColor}
+        chatContextLabel={chatContextLabel}
+        chatContextIsSide={isSideChat}
+        onLayout={(event) =>
+          setAppHeaderHeight(event.nativeEvent.layout.height)
+        }
         onOpenSidebar={() => setIsSidebarOpen(true)}
         onOpenSettings={() => setIsSettingsMenuOpen(true)}
         onMascotPress={() => setIsEditAgentOpen(true)}
@@ -210,14 +243,22 @@ export default function TabLayout() {
         onEditAvatar={() => setIsEditAgentOpen(true)}
         onRename={() => setIsEditAgentOpen(true)}
         onClearChat={() => {
-          showToast("Conversation cleared");
+          return requestChatAction("clear").then((handled) => {
+            if (!handled) showToast("Chat is still loading.");
+          });
         }}
         onDeleteChat={() => {
-          showToast("Chat deleted");
+          return requestChatAction("delete").then((handled) => {
+            if (!handled) showToast("Chat is still loading.");
+          });
         }}
         onShareChat={() => {
-          showToast("Chat export created");
+          void requestChatAction("export").then((handled) => {
+            if (!handled) router.navigate("/(tabs)/chat" as any);
+          });
         }}
+        showChatManagement={showChatManagement}
+        isMainChat={isMainChat}
       />
 
       {/* 5. Edit Mascot Avatar & Name Modal */}

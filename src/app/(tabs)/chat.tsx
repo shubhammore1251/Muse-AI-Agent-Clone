@@ -7,9 +7,17 @@
  */
 
 import { ChatBrowserPreview } from "@/components/common/ChatBrowserPreview";
+import { LinkifiedText } from "@/components/common/LinkifiedText";
 import { Colors } from "@/constants/colors";
+import { useChatExport } from "@/context/ChatExportContext";
 import { showToast } from "@/context/ToastContext";
 import { logAgentEvent, safeErrorMessage } from "@/lib/agentLogger";
+import { getChatDateKey, getChatDateLabel } from "@/lib/chatDateLabels";
+import {
+  ChatExportDestination,
+  ChatExportFormat,
+  exportChat,
+} from "@/lib/chatExport";
 import {
   createScheduledAgentTask,
   formatScheduleRule,
@@ -17,7 +25,10 @@ import {
 import { getApiUrl } from "@/lib/services";
 import { supabase } from "@/lib/supabase";
 import {
+  ChatMessageCursor,
   CreateNewThread,
+  clearThreadMessages,
+  deleteSingleThread,
   getThread,
   loadMessages,
   saveMessage,
@@ -26,13 +37,16 @@ import {
 import { ChatMessage } from "@/types";
 import {
   Add01Icon,
+  Download04Icon,
+  File01Icon,
   Link02Icon,
   Mic01Icon,
   SentIcon,
+  Share01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react-native";
 import * as Clipboard from "expo-clipboard";
-import { useLocalSearchParams } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import * as WebBrowser from "expo-web-browser";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -40,6 +54,7 @@ import {
   Animated,
   Keyboard,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   ScrollView,
   StyleSheet,
@@ -54,6 +69,14 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 type AgentActivityStage =
   | "thinking"
   | "understanding_request"
+  | "opening_source"
+  | "searching_web"
+  | "reading_results"
+  | "inspecting_details"
+  | "comparing_options"
+  | "typing_in_page"
+  | "clicking_page"
+  | "scrolling_page"
   | "browsing_web"
   | "using_connected_tools"
   | "using_email"
@@ -64,34 +87,74 @@ type AgentActivityStage =
 type AgentActivity = {
   current: AgentActivityStage;
   completed: AgentActivityStage[];
+  detail?: string;
 } | null;
 
+function mapStoredMessages(rows: any[]): ChatMessage[] {
+  return rows.map((message: any) => ({
+    id: String(message.id),
+    sender: message.role === "user" ? "user" : "agent",
+    text: message.content,
+    timestamp: new Date(message.created_at).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    }),
+    clarification: message.metadata?.clarification,
+    createdAt: message.created_at,
+    scheduleConfirmation: message.metadata?.scheduleConfirmation,
+    scheduleExecutionId: message.metadata?.scheduleExecutionId,
+    scheduleStatus: message.metadata?.scheduleStatus,
+    scheduledTaskId: message.metadata?.scheduledTaskId,
+    scheduleError: message.metadata?.scheduleError,
+  }));
+}
+
 export default function ChatScreen() {
+  const { registerChatAction, setChatHeaderIdentity } = useChatExport();
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const headerOffset = Platform.OS === "web" ? 0 : insets.top + 98;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState("");
   const scrollViewRef = useRef<ScrollView>(null);
   const shouldAutoScrollRef = useRef(true);
-  const insets = useSafeAreaInsets();
+  const messagesRef = useRef<ChatMessage[]>([]);
+  const olderMessagesCursorRef = useRef<ChatMessageCursor | null>(null);
+  const isLoadingOlderRef = useRef(false);
+  const scrollMetricsRef = useRef({
+    offsetY: 0,
+    contentHeight: 0,
+    viewportHeight: 0,
+  });
+  const prependScrollAnchorRef = useRef<{
+    offsetY: number;
+    contentHeight: number;
+  } | null>(null);
   const [isLoadingMessages, setIsLoadingMessages] = useState(true);
+  const [isLoadingOlderMessages, setIsLoadingOlderMessages] = useState(false);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [agentActivity, setAgentActivity] = useState<AgentActivity>(null);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [threadData, setThreadData] = useState<any>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+  const [isExportMenuVisible, setIsExportMenuVisible] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [selectedExportFormat, setSelectedExportFormat] =
+    useState<ChatExportFormat | null>(null);
   const historyLoadIdRef = useRef(0);
   const activeAgentRequestIdRef = useRef(0);
   const confirmingScheduleIdsRef = useRef(new Set<string>());
   const isSendingRef = useRef(false);
   const threadIdRef = useRef(threadId);
   threadIdRef.current = threadId;
+  messagesRef.current = messages;
 
-  const { sideChatThreadId } = useLocalSearchParams();
+  const { sideChatThreadId, chatType } = useLocalSearchParams();
   const requestedThreadId =
     typeof sideChatThreadId === "string" ? sideChatThreadId : null;
-
-  // Calculate header height offset for iOS KeyboardAvoidingView
-  const headerOffset = Platform.OS === "web" ? 0 : insets.top + 98;
+  const routeIsSideChat = chatType === "side";
 
   useEffect(() => {
     const loadUser = async () => {
@@ -117,6 +180,12 @@ export default function ChatScreen() {
   }, [messages]);
 
   useEffect(() => {
+    setThreadData(null);
+    setChatHeaderIdentity({
+      threadId: requestedThreadId,
+      type: routeIsSideChat ? "side" : "main",
+      title: routeIsSideChat ? "Side Chat" : "Main Chat",
+    });
     if (!requestedThreadId && !userEmail) return;
 
     let active = true;
@@ -127,6 +196,17 @@ export default function ChatScreen() {
     setIsSending(false);
     setAgentActivity(null);
     setIsLoadingMessages(true);
+    setIsLoadingOlderMessages(false);
+    setHasOlderMessages(false);
+    isLoadingOlderRef.current = false;
+    olderMessagesCursorRef.current = null;
+    prependScrollAnchorRef.current = null;
+    scrollMetricsRef.current = {
+      offsetY: 0,
+      contentHeight: 0,
+      viewportHeight: 0,
+    };
+    shouldAutoScrollRef.current = true;
     setMessages([]);
 
     const loadThreadAndMessages = async () => {
@@ -149,30 +229,25 @@ export default function ChatScreen() {
 
         if (!active || historyLoadIdRef.current !== loadId) return;
         setThreadData(thread);
+        const isSideThread = thread?.type === "side";
+        setChatHeaderIdentity({
+          threadId: thread?.id ?? requestedThreadId,
+          type: isSideThread ? "side" : "main",
+          title: isSideThread
+            ? typeof thread?.title === "string" && thread.title.trim()
+              ? thread.title.trim()
+              : "Side Chat"
+            : "Main Chat",
+        });
 
         const activeThreadId = thread?.id ?? requestedThreadId;
         if (!activeThreadId) return;
 
         const history = await loadMessages(activeThreadId);
         if (!active || historyLoadIdRef.current !== loadId) return;
-
-        const mappedMessages = history?.map((msg: any) => ({
-          id: msg.id,
-          sender: msg.role === "user" ? "user" : "agent",
-          text: msg.content,
-          timestamp: new Date(msg.created_at).toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          }),
-          clarification: msg.metadata?.clarification,
-          scheduleConfirmation: msg.metadata?.scheduleConfirmation,
-          scheduleExecutionId: msg.metadata?.scheduleExecutionId,
-          scheduleStatus: msg.metadata?.scheduleStatus,
-          scheduledTaskId: msg.metadata?.scheduledTaskId,
-          scheduleError: msg.metadata?.scheduleError,
-        })) as ChatMessage[];
-
-        setMessages(mappedMessages ?? []);
+        olderMessagesCursorRef.current = history.nextCursor;
+        setHasOlderMessages(history.hasMore);
+        setMessages(mapStoredMessages(history.messages));
       } catch (error) {
         if (active && historyLoadIdRef.current === loadId) {
           console.error("Failed to load chat history:", error);
@@ -191,21 +266,82 @@ export default function ChatScreen() {
       active = false;
       historyLoadIdRef.current += 1;
     };
-  }, [requestedThreadId, userEmail]);
+  }, [requestedThreadId, userEmail, routeIsSideChat, setChatHeaderIdentity]);
 
-  // Scroll to bottom when keyboard appears
-  useEffect(() => {
-    const showEvent =
-      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
-    const sub = Keyboard.addListener(showEvent, () => {
-      if (shouldAutoScrollRef.current) {
-        setTimeout(() => {
-          scrollViewRef.current?.scrollToEnd({ animated: true });
-        }, 100);
+  const loadOlderMessages = async () => {
+    const activeThreadId = threadIdRef.current;
+    const cursor = olderMessagesCursorRef.current;
+    if (
+      !activeThreadId ||
+      !cursor ||
+      !hasOlderMessages ||
+      isLoadingMessages ||
+      isLoadingOlderRef.current
+    ) {
+      return;
+    }
+
+    shouldAutoScrollRef.current = false;
+    const loadId = historyLoadIdRef.current;
+    isLoadingOlderRef.current = true;
+    setIsLoadingOlderMessages(true);
+    try {
+      const page = await loadMessages(activeThreadId, cursor);
+      if (
+        loadId !== historyLoadIdRef.current ||
+        threadIdRef.current !== activeThreadId
+      ) {
+        return;
       }
+
+      const olderMessages = mapStoredMessages(page.messages);
+      const existingIds = new Set(messagesRef.current.map(({ id }) => id));
+      const uniqueOlderMessages = olderMessages.filter(
+        ({ id }) => !existingIds.has(id),
+      );
+      if (uniqueOlderMessages.length) {
+        prependScrollAnchorRef.current = {
+          offsetY: scrollMetricsRef.current.offsetY,
+          contentHeight: scrollMetricsRef.current.contentHeight,
+        };
+        setMessages((currentMessages) => {
+          const currentIds = new Set(currentMessages.map(({ id }) => id));
+          return [
+            ...uniqueOlderMessages.filter(({ id }) => !currentIds.has(id)),
+            ...currentMessages,
+          ];
+        });
+      }
+      olderMessagesCursorRef.current = page.nextCursor;
+      setHasOlderMessages(page.hasMore);
+    } catch (error) {
+      showToast("Couldn't load older messages.");
+      console.error("Failed to load older chat messages:", error);
+    } finally {
+      isLoadingOlderRef.current = false;
+      setIsLoadingOlderMessages(false);
+    }
+  };
+
+  const loadOlderMessagesToFillViewport = (contentHeight: number) => {
+    const viewportHeight = scrollMetricsRef.current.viewportHeight;
+    if (
+      viewportHeight > 0 &&
+      contentHeight <= viewportHeight + 1 &&
+      hasOlderMessages &&
+      !isLoadingMessages &&
+      !isLoadingOlderRef.current
+    ) {
+      void loadOlderMessages();
+    }
+  };
+  useEffect(() => {
+    if (isLoadingMessages) return;
+    const frame = requestAnimationFrame(() => {
+      loadOlderMessagesToFillViewport(scrollMetricsRef.current.contentHeight);
     });
-    return () => sub.remove();
-  }, []);
+    return () => cancelAnimationFrame(frame);
+  }, [isLoadingMessages, hasOlderMessages, messages.length]);
 
   const submitPrompt = async (
     text: string,
@@ -218,6 +354,7 @@ export default function ChatScreen() {
     const requestId = ++activeAgentRequestIdRef.current;
     const requestThreadId = threadId ?? "";
     const agentMessageId = `msg-${Date.now()}-${requestId}`;
+    const createdAt = new Date().toISOString();
     const timestamp = new Date().toLocaleTimeString([], {
       hour: "2-digit",
       minute: "2-digit",
@@ -231,12 +368,13 @@ export default function ChatScreen() {
       sender: "user",
       text,
       timestamp,
+      createdAt,
     };
 
     setMessages((prev) => [
       ...prev,
       userMsg,
-      { id: agentMessageId, sender: "agent", text: "", timestamp },
+      { id: agentMessageId, sender: "agent", text: "", timestamp, createdAt },
     ]);
     setInputText("");
 
@@ -249,22 +387,36 @@ export default function ChatScreen() {
     const isRequestCurrent = () =>
       activeAgentRequestIdRef.current === requestId &&
       threadIdRef.current === requestThreadId;
-    const recordAgentActivity = (stage: unknown) => {
+    const recordAgentActivity = (stage: unknown, detail?: unknown) => {
       if (!isRequestCurrent() || !isAgentActivityStage(stage)) return;
+      const activityDetail = typeof detail === "string" ? detail : undefined;
 
       setAgentActivity((previous) => {
-        if (!previous) return { current: stage, completed: [] };
-        if (previous.current === stage) return previous;
+        if (!previous) {
+          return { current: stage, completed: [], detail: activityDetail };
+        }
+        if (previous.current === stage && previous.detail === activityDetail) {
+          return previous;
+        }
 
         return {
           current: stage,
           completed: [...previous.completed, previous.current].slice(-3),
+          detail: activityDetail,
         };
       });
     };
 
     try {
-      await saveMessage(requestThreadId, userEmail ?? "", "user", text, {});
+      const savedUserMessage = await saveMessage(
+        requestThreadId,
+        userEmail ?? "",
+        "user",
+        text,
+        {},
+      );
+      const { data: authData } = await supabase.auth.getSession();
+      const accessToken = authData.session?.access_token;
 
       const ApiUrl = getApiUrl("/chat");
 
@@ -272,9 +424,17 @@ export default function ChatScreen() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
         },
         body: JSON.stringify({
-          messages: [...baseMessages, userMsg],
+          messages: [
+            {
+              ...userMsg,
+              id: savedUserMessage?.id ?? userMsg.id,
+              created_at: savedUserMessage?.created_at,
+            },
+          ],
+          threadId: requestThreadId,
           userId,
           timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         }),
@@ -306,7 +466,7 @@ export default function ChatScreen() {
           const data = JSON.parse(line);
 
           if (data.type === "activity") {
-            recordAgentActivity(data.activity);
+            recordAgentActivity(data.activity, data.detail);
           }
 
           if (data.type === "browser") {
@@ -658,6 +818,120 @@ export default function ChatScreen() {
     }
   };
 
+  const handleExportChat = async (destination: ChatExportDestination) => {
+    if (isExporting) return;
+    if (!selectedExportFormat) return;
+    if (isLoadingMessages) {
+      showToast("Chat messages are still loading.");
+      return;
+    }
+
+    setIsExporting(true);
+    try {
+      let exportMessages = messagesRef.current;
+      let cursor = olderMessagesCursorRef.current;
+      const activeThreadId = threadIdRef.current;
+      if (activeThreadId && hasOlderMessages && cursor) {
+        let olderMessages: ChatMessage[] = [];
+        while (cursor) {
+          const page = await loadMessages(activeThreadId, cursor);
+          olderMessages = [
+            ...mapStoredMessages(page.messages),
+            ...olderMessages,
+          ];
+          cursor = page.hasMore ? page.nextCursor : null;
+        }
+        exportMessages = [...olderMessages, ...messagesRef.current];
+      }
+
+      const snapshot = exportMessages
+        .filter((message) => message.text.trim())
+        .map(({ id, sender, text, timestamp }) => ({
+          id,
+          sender,
+          text,
+          timestamp,
+        }));
+
+      if (snapshot.length === 0) {
+        showToast("There are no messages to export.");
+        return;
+      }
+
+      const didExport = await exportChat(
+        snapshot,
+        threadData?.title || "Muse AI Chat",
+        selectedExportFormat,
+        destination,
+      );
+      setSelectedExportFormat(null);
+      setIsExportMenuVisible(false);
+      if (!didExport) return;
+      showToast(
+        `${selectedExportFormat === "pdf" ? "PDF" : "Word"} export is ready.`,
+      );
+    } catch (error) {
+      console.error("Chat export failed:", error);
+      showToast(
+        error instanceof Error && error.message
+          ? error.message
+          : "Couldn't export chat. Please try again.",
+      );
+      setSelectedExportFormat(null);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleClearCurrentThread = async () => {
+    const activeThreadId = threadIdRef.current;
+    if (isLoadingMessages || !activeThreadId) {
+      throw new Error("Wait for this conversation to finish loading.");
+    }
+
+    await clearThreadMessages(activeThreadId);
+    historyLoadIdRef.current += 1;
+    isLoadingOlderRef.current = false;
+    setIsLoadingOlderMessages(false);
+    setMessages([]);
+    olderMessagesCursorRef.current = null;
+    setHasOlderMessages(false);
+    shouldAutoScrollRef.current = true;
+    showToast("Messages cleared.");
+  };
+
+  const handleDeleteCurrentThread = async () => {
+    const activeThreadId = threadIdRef.current;
+    if (isLoadingMessages || !activeThreadId) {
+      throw new Error("Wait for this conversation to finish loading.");
+    }
+    if (threadData?.type !== "side") {
+      throw new Error("The main chat cannot be deleted.");
+    }
+
+    await deleteSingleThread(activeThreadId);
+    historyLoadIdRef.current += 1;
+    isLoadingOlderRef.current = false;
+    setIsLoadingOlderMessages(false);
+    setMessages([]);
+    olderMessagesCursorRef.current = null;
+    setHasOlderMessages(false);
+    setThreadData(null);
+    setThreadId(null);
+    setChatHeaderIdentity({ threadId: null, type: "main", title: "Main Chat" });
+    router.replace("/(tabs)/chat" as any);
+    showToast("Chat deleted.");
+  };
+
+  useEffect(() => {
+    const unregister = [
+      registerChatAction("export", () => setIsExportMenuVisible(true)),
+      registerChatAction("clear", handleClearCurrentThread),
+      registerChatAction("delete", handleDeleteCurrentThread),
+    ];
+    return () => unregister.forEach((removeHandler) => removeHandler());
+  }, [registerChatAction, isLoadingMessages, threadData, router]);
+
   return (
     <KeyboardAvoidingView
       style={styles.container}
@@ -675,12 +949,51 @@ export default function ChatScreen() {
           }
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
+          onLayout={({ nativeEvent }) => {
+            scrollMetricsRef.current.viewportHeight = nativeEvent.layout.height;
+            loadOlderMessagesToFillViewport(
+              scrollMetricsRef.current.contentHeight,
+            );
+          }}
           onScroll={({ nativeEvent }) => {
             const { contentOffset, contentSize, layoutMeasurement } =
               nativeEvent;
+            scrollMetricsRef.current.offsetY = contentOffset.y;
+            scrollMetricsRef.current.contentHeight = contentSize.height;
+            scrollMetricsRef.current.viewportHeight = layoutMeasurement.height;
             shouldAutoScrollRef.current =
               contentSize.height - layoutMeasurement.height - contentOffset.y <=
               80;
+            if (
+              contentOffset.y <= 80 &&
+              hasOlderMessages &&
+              !isLoadingOlderRef.current
+            ) {
+              shouldAutoScrollRef.current = false;
+              void loadOlderMessages();
+            }
+          }}
+          onContentSizeChange={(_, height) => {
+            const anchor = prependScrollAnchorRef.current;
+            scrollMetricsRef.current.contentHeight = height;
+            if (!anchor) {
+              loadOlderMessagesToFillViewport(height);
+              return;
+            }
+
+            prependScrollAnchorRef.current = null;
+            const restoredOffset = Math.max(
+              0,
+              anchor.offsetY + height - anchor.contentHeight,
+            );
+            requestAnimationFrame(() => {
+              scrollViewRef.current?.scrollTo({
+                y: restoredOffset,
+                animated: false,
+              });
+              scrollMetricsRef.current.offsetY = restoredOffset;
+              loadOlderMessagesToFillViewport(height);
+            });
           }}
           scrollEventThrottle={16}
         >
@@ -689,13 +1002,6 @@ export default function ChatScreen() {
             accessible={false}
           >
             <View style={styles.scrollInner}>
-              {/* Centered Date Badge */}
-              <View style={styles.dateBadgeContainer}>
-                <View style={styles.dateBadge}>
-                  <Text style={styles.dateBadgeText}>Today</Text>
-                </View>
-              </View>
-
               {/* Messages */}
               {isLoadingMessages ? (
                 <ChatHistorySkeleton />
@@ -706,197 +1012,221 @@ export default function ChatScreen() {
                   </Text>
                 </View>
               ) : (
-                messages.map((msg) => {
-                  const isUser = msg.sender === "user";
-                  if (
-                    !msg.text.trim() &&
-                    !msg.connectCta &&
-                    !msg.browserPreview &&
-                    !msg.scheduleConfirmation
-                  ) {
-                    return null;
-                  }
+                messages
+                  .filter(
+                    (message) =>
+                      message.text.trim() ||
+                      message.connectCta ||
+                      message.browserPreview ||
+                      message.scheduleConfirmation,
+                  )
+                  .map((msg, index, visibleMessages) => {
+                    const isUser = msg.sender === "user";
+                    const previousMessage = visibleMessages[index - 1];
+                    const showDateBadge =
+                      !previousMessage ||
+                      getChatDateKey(previousMessage.createdAt) !==
+                        getChatDateKey(msg.createdAt);
 
-                  return (
-                    <TouchableOpacity
-                      key={msg.id}
-                      activeOpacity={0.9}
-                      onLongPress={() => handleCopy(msg.text)}
-                      onPress={() => showToast(msg.text)}
-                      style={[
-                        styles.messageRow,
-                        isUser ? styles.userMessageRow : styles.agentMessageRow,
-                      ]}
-                    >
-                      <View
-                        style={[
-                          styles.bubble,
-                          isUser ? styles.userBubble : styles.agentBubble,
-                        ]}
-                      >
-                        <Text
+                    return (
+                      <View key={msg.id}>
+                        {showDateBadge ? (
+                          <View style={styles.dateBadgeContainer}>
+                            <View style={styles.dateBadge}>
+                              <Text style={styles.dateBadgeText}>
+                                {getChatDateLabel(msg.createdAt)}
+                              </Text>
+                            </View>
+                          </View>
+                        ) : null}
+                        <TouchableOpacity
+                          activeOpacity={0.9}
+                          onLongPress={() => handleCopy(msg.text)}
+                          onPress={() => showToast(msg.text)}
                           style={[
-                            styles.bubbleText,
+                            styles.messageRow,
                             isUser
-                              ? styles.userBubbleText
-                              : styles.agentBubbleText,
+                              ? styles.userMessageRow
+                              : styles.agentMessageRow,
                           ]}
                         >
-                          {msg.text}
-                        </Text>
+                          <View
+                            style={[
+                              styles.bubble,
+                              isUser ? styles.userBubble : styles.agentBubble,
+                            ]}
+                          >
+                            <LinkifiedText
+                              text={msg.text}
+                              style={[
+                                styles.bubbleText,
+                                isUser
+                                  ? styles.userBubbleText
+                                  : styles.agentBubbleText,
+                              ]}
+                            />
 
-                        {!isUser && msg.connectCta ? (
-                          <View style={styles.connectCard}>
-                            <View style={styles.connectIcon}>
-                              <HugeiconsIcon
-                                icon={Link02Icon}
-                                size={20}
-                                color={Colors.primary}
-                                strokeWidth={2}
-                              />
-                            </View>
-                            <View style={styles.connectBody}>
-                              <Text style={styles.connectTitle}>
-                                Connect {msg.connectCta.toolName}
-                              </Text>
-                              <Text style={styles.connectSubtitle}>
-                                Complete authorization, then send done.
-                              </Text>
-                            </View>
-                            <TouchableOpacity
-                              style={styles.connectButton}
-                              onPress={() =>
-                                handleOpenConnectLink(
-                                  msg.connectCta!.connectUrl,
-                                  msg.connectCta!.toolName,
-                                )
-                              }
-                              activeOpacity={0.8}
-                            >
-                              <Text style={styles.connectButtonText}>
-                                Connect
-                              </Text>
-                            </TouchableOpacity>
-                          </View>
-                        ) : null}
-
-                        {!isUser && msg.browserPreview ? (
-                          <ChatBrowserPreview
-                            browserPreview={msg.browserPreview}
-                          />
-                        ) : null}
-
-                        {!isUser && msg.clarification ? (
-                          <View style={styles.clarificationCard}>
-                            <Text style={styles.clarificationTitle}>
-                              {msg.clarification.question}
-                            </Text>
-                            {msg.clarification.choices.map((choice) => (
-                              <TouchableOpacity
-                                key={choice.value}
-                                style={styles.clarificationButton}
-                                onPress={() =>
-                                  handleClarificationChoice(
-                                    msg.id,
-                                    choice.value,
-                                  )
-                                }
-                                activeOpacity={0.85}
-                              >
-                                <Text style={styles.clarificationButtonText}>
-                                  {choice.label}
-                                </Text>
-                              </TouchableOpacity>
-                            ))}
-                          </View>
-                        ) : null}
-
-                        {!isUser &&
-                        msg.scheduleConfirmation &&
-                        msg.scheduleStatus !== "cancelled" ? (
-                          <View style={styles.scheduleCard}>
-                            <Text style={styles.scheduleTitle}>
-                              Schedule this task?
-                            </Text>
-                            <View style={styles.scheduleDetailRow}>
-                              <Text style={styles.scheduleLabel}>Task</Text>
-                              <Text style={styles.scheduleValue}>
-                                {msg.scheduleConfirmation.title}
-                              </Text>
-                            </View>
-                            <View style={styles.scheduleDetailRow}>
-                              <Text style={styles.scheduleLabel}>When</Text>
-                              <Text style={styles.scheduleValue}>
-                                {formatScheduleRule(
-                                  msg.scheduleConfirmation.scheduleRule,
-                                )}
-                              </Text>
-                            </View>
-                            <View style={styles.scheduleDetailRow}>
-                              <Text style={styles.scheduleLabel}>Delivery</Text>
-                              <Text style={styles.scheduleValue}>
-                                {formatDeliveryLabel(
-                                  msg.scheduleConfirmation.delivery,
-                                )}
-                              </Text>
-                            </View>
-                            <Text style={styles.scheduleSummary}>
-                              {msg.scheduleConfirmation.summary}
-                            </Text>
-
-                            {msg.scheduleError ? (
-                              <Text style={styles.scheduleError}>
-                                {msg.scheduleError}
-                              </Text>
+                            {!isUser && msg.connectCta ? (
+                              <View style={styles.connectCard}>
+                                <View style={styles.connectIcon}>
+                                  <HugeiconsIcon
+                                    icon={Link02Icon}
+                                    size={20}
+                                    color={Colors.primary}
+                                    strokeWidth={2}
+                                  />
+                                </View>
+                                <View style={styles.connectBody}>
+                                  <Text style={styles.connectTitle}>
+                                    Connect {msg.connectCta.toolName}
+                                  </Text>
+                                  <Text style={styles.connectSubtitle}>
+                                    Complete authorization, then send done.
+                                  </Text>
+                                </View>
+                                <TouchableOpacity
+                                  style={styles.connectButton}
+                                  onPress={() =>
+                                    handleOpenConnectLink(
+                                      msg.connectCta!.connectUrl,
+                                      msg.connectCta!.toolName,
+                                    )
+                                  }
+                                  activeOpacity={0.8}
+                                >
+                                  <Text style={styles.connectButtonText}>
+                                    Connect
+                                  </Text>
+                                </TouchableOpacity>
+                              </View>
                             ) : null}
 
-                            <View style={styles.scheduleActions}>
-                              <TouchableOpacity
-                                style={[
-                                  styles.scheduleButton,
-                                  styles.schedulePrimaryButton,
-                                  msg.scheduleStatus !== "pending" &&
-                                    styles.scheduleButtonDisabled,
-                                ]}
-                                disabled={msg.scheduleStatus !== "pending"}
-                                onPress={() => handleConfirmSchedule(msg.id)}
-                                activeOpacity={0.8}
-                              >
-                                <Text style={styles.schedulePrimaryButtonText}>
-                                  {msg.scheduleStatus === "saving"
-                                    ? "Saving..."
-                                    : msg.scheduleStatus === "confirmed"
-                                      ? "Confirmed"
-                                      : "Confirm"}
+                            {!isUser && msg.browserPreview ? (
+                              <ChatBrowserPreview
+                                browserPreview={msg.browserPreview}
+                              />
+                            ) : null}
+
+                            {!isUser && msg.clarification ? (
+                              <View style={styles.clarificationCard}>
+                                <Text style={styles.clarificationTitle}>
+                                  {msg.clarification.question}
                                 </Text>
-                              </TouchableOpacity>
-                              <TouchableOpacity
-                                style={styles.scheduleButton}
-                                disabled={msg.scheduleStatus !== "pending"}
-                                onPress={() => handleEditSchedule(msg.id)}
-                                activeOpacity={0.8}
-                              >
-                                <Text style={styles.scheduleButtonText}>
-                                  Edit
+                                {msg.clarification.choices.map((choice) => (
+                                  <TouchableOpacity
+                                    key={choice.value}
+                                    style={styles.clarificationButton}
+                                    onPress={() =>
+                                      handleClarificationChoice(
+                                        msg.id,
+                                        choice.value,
+                                      )
+                                    }
+                                    activeOpacity={0.85}
+                                  >
+                                    <Text
+                                      style={styles.clarificationButtonText}
+                                    >
+                                      {choice.label}
+                                    </Text>
+                                  </TouchableOpacity>
+                                ))}
+                              </View>
+                            ) : null}
+
+                            {!isUser &&
+                            msg.scheduleConfirmation &&
+                            msg.scheduleStatus !== "cancelled" ? (
+                              <View style={styles.scheduleCard}>
+                                <Text style={styles.scheduleTitle}>
+                                  Schedule this task?
                                 </Text>
-                              </TouchableOpacity>
-                              <TouchableOpacity
-                                style={styles.scheduleButton}
-                                disabled={msg.scheduleStatus !== "pending"}
-                                onPress={() => handleCancelSchedule(msg.id)}
-                                activeOpacity={0.8}
-                              >
-                                <Text style={styles.scheduleButtonText}>
-                                  Cancel
+                                <View style={styles.scheduleDetailRow}>
+                                  <Text style={styles.scheduleLabel}>Task</Text>
+                                  <Text style={styles.scheduleValue}>
+                                    {msg.scheduleConfirmation.title}
+                                  </Text>
+                                </View>
+                                <View style={styles.scheduleDetailRow}>
+                                  <Text style={styles.scheduleLabel}>When</Text>
+                                  <Text style={styles.scheduleValue}>
+                                    {formatScheduleRule(
+                                      msg.scheduleConfirmation.scheduleRule,
+                                    )}
+                                  </Text>
+                                </View>
+                                <View style={styles.scheduleDetailRow}>
+                                  <Text style={styles.scheduleLabel}>
+                                    Delivery
+                                  </Text>
+                                  <Text style={styles.scheduleValue}>
+                                    {formatDeliveryLabel(
+                                      msg.scheduleConfirmation.delivery,
+                                    )}
+                                  </Text>
+                                </View>
+                                <Text style={styles.scheduleSummary}>
+                                  {msg.scheduleConfirmation.summary}
                                 </Text>
-                              </TouchableOpacity>
-                            </View>
+
+                                {msg.scheduleError ? (
+                                  <Text style={styles.scheduleError}>
+                                    {msg.scheduleError}
+                                  </Text>
+                                ) : null}
+
+                                <View style={styles.scheduleActions}>
+                                  <TouchableOpacity
+                                    style={[
+                                      styles.scheduleButton,
+                                      styles.schedulePrimaryButton,
+                                      msg.scheduleStatus !== "pending" &&
+                                        styles.scheduleButtonDisabled,
+                                    ]}
+                                    disabled={msg.scheduleStatus !== "pending"}
+                                    onPress={() =>
+                                      handleConfirmSchedule(msg.id)
+                                    }
+                                    activeOpacity={0.8}
+                                  >
+                                    <Text
+                                      style={styles.schedulePrimaryButtonText}
+                                    >
+                                      {msg.scheduleStatus === "saving"
+                                        ? "Saving..."
+                                        : msg.scheduleStatus === "confirmed"
+                                          ? "Confirmed"
+                                          : "Confirm"}
+                                    </Text>
+                                  </TouchableOpacity>
+                                  <TouchableOpacity
+                                    style={styles.scheduleButton}
+                                    disabled={msg.scheduleStatus !== "pending"}
+                                    onPress={() => handleEditSchedule(msg.id)}
+                                    activeOpacity={0.8}
+                                  >
+                                    <Text style={styles.scheduleButtonText}>
+                                      Edit
+                                    </Text>
+                                  </TouchableOpacity>
+                                  <TouchableOpacity
+                                    style={styles.scheduleButton}
+                                    disabled={msg.scheduleStatus !== "pending"}
+                                    onPress={() => handleCancelSchedule(msg.id)}
+                                    activeOpacity={0.8}
+                                  >
+                                    <Text style={styles.scheduleButtonText}>
+                                      Cancel
+                                    </Text>
+                                  </TouchableOpacity>
+                                </View>
+                              </View>
+                            ) : null}
                           </View>
-                        ) : null}
+                        </TouchableOpacity>
                       </View>
-                    </TouchableOpacity>
-                  );
-                })
+                    );
+                  })
               )}
 
               {isSending && agentActivity ? (
@@ -905,6 +1235,15 @@ export default function ChatScreen() {
             </View>
           </TouchableWithoutFeedback>
         </ScrollView>
+
+        {isLoadingOlderMessages ? (
+          <View
+            pointerEvents="none"
+            style={styles.olderMessagesLoadingIndicator}
+          >
+            <ActivityIndicator size="small" color={Colors.iconMuted} />
+          </View>
+        ) : null}
 
         {/* Floating Input Pill */}
         <View style={styles.inputWrapper}>
@@ -928,6 +1267,7 @@ export default function ChatScreen() {
               style={styles.textInput}
               value={inputText}
               editable={!isLoadingMessages}
+              multiline
               onChangeText={setInputText}
               placeholder="Ask Cooper to read emails, send Slack msgs, or schedule meetings..."
               placeholderTextColor={Colors.iconMuted}
@@ -967,6 +1307,202 @@ export default function ChatScreen() {
           </View>
         </View>
       </View>
+      <Modal
+        visible={isExportMenuVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!isExporting) setIsExportMenuVisible(false);
+        }}
+      >
+        <TouchableWithoutFeedback
+          onPress={() => {
+            if (!isExporting) setIsExportMenuVisible(false);
+          }}
+        >
+          <View style={styles.exportOverlay}>
+            <TouchableWithoutFeedback>
+              <View style={styles.exportDialog}>
+                <Text style={styles.exportTitle}>
+                  {selectedExportFormat
+                    ? `Export ${selectedExportFormat === "pdf" ? "PDF" : "Word"}`
+                    : "Export Chat"}
+                </Text>
+                <Text style={styles.exportDescription}>
+                  {isLoadingMessages
+                    ? "Loading conversation..."
+                    : isExporting
+                      ? "Preparing your conversation..."
+                      : !messages.some((message) => message.text.trim())
+                        ? "There are no messages to export."
+                        : selectedExportFormat
+                          ? "Choose how you want to export this file."
+                          : "Choose a format"}
+                </Text>
+                {isExporting ? (
+                  <View style={styles.exportBusyRow}>
+                    <ActivityIndicator color={Colors.primary} />
+                    <Text style={styles.exportBusyText}>
+                      Preparing{" "}
+                      {selectedExportFormat === "pdf" ? "PDF" : "Word document"}
+                      ...
+                    </Text>
+                  </View>
+                ) : null}
+                {selectedExportFormat ? (
+                  <>
+                    <TouchableOpacity
+                      style={[
+                        styles.exportOption,
+                        isExporting && styles.exportOptionDisabled,
+                      ]}
+                      disabled={isExporting}
+                      onPress={() => void handleExportChat("share")}
+                      activeOpacity={0.75}
+                    >
+                      <View style={[styles.exportIconBox, styles.shareIconBox]}>
+                        <HugeiconsIcon
+                          icon={Share01Icon}
+                          size={20}
+                          color={Colors.info}
+                          strokeWidth={1.8}
+                        />
+                      </View>
+                      <View style={styles.exportOptionCopy}>
+                        <Text style={styles.exportOptionText}>Share</Text>
+                        <Text style={styles.exportOptionHint}>
+                          Send to another app
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.exportOption,
+                        isExporting && styles.exportOptionDisabled,
+                      ]}
+                      disabled={isExporting}
+                      onPress={() => void handleExportChat("download")}
+                      activeOpacity={0.75}
+                    >
+                      <View
+                        style={[styles.exportIconBox, styles.downloadIconBox]}
+                      >
+                        <HugeiconsIcon
+                          icon={Download04Icon}
+                          size={20}
+                          color={Colors.success}
+                          strokeWidth={1.8}
+                        />
+                      </View>
+                      <View style={styles.exportOptionCopy}>
+                        <Text style={styles.exportOptionText}>
+                          {Platform.OS === "ios"
+                            ? "Save / Download"
+                            : "Download"}
+                        </Text>
+                        <Text style={styles.exportOptionHint}>
+                          {Platform.OS === "android"
+                            ? "Choose a folder on your device"
+                            : Platform.OS === "ios"
+                              ? "Save to Files from the share sheet"
+                              : selectedExportFormat === "pdf"
+                                ? "Save from your browser's print dialog"
+                                : "Save a .docx file to your device"}
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.exportBack}
+                      disabled={isExporting}
+                      onPress={() => setSelectedExportFormat(null)}
+                      activeOpacity={0.75}
+                    >
+                      <Text style={styles.exportCancelText}>
+                        Back to formats
+                      </Text>
+                    </TouchableOpacity>
+                  </>
+                ) : (
+                  <>
+                    <TouchableOpacity
+                      style={[
+                        styles.exportOption,
+                        (isLoadingMessages ||
+                          isExporting ||
+                          !messages.some((message) => message.text.trim())) &&
+                          styles.exportOptionDisabled,
+                      ]}
+                      disabled={
+                        isLoadingMessages ||
+                        isExporting ||
+                        !messages.some((message) => message.text.trim())
+                      }
+                      onPress={() => setSelectedExportFormat("pdf")}
+                      activeOpacity={0.75}
+                    >
+                      <View style={[styles.exportIconBox, styles.pdfIconBox]}>
+                        <HugeiconsIcon
+                          icon={File01Icon}
+                          size={20}
+                          color={Colors.error}
+                          strokeWidth={1.8}
+                        />
+                      </View>
+                      <View style={styles.exportOptionCopy}>
+                        <Text style={styles.exportOptionText}>PDF</Text>
+                        <Text style={styles.exportOptionHint}>
+                          Portable document
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.exportOption,
+                        (isLoadingMessages ||
+                          isExporting ||
+                          !messages.some((message) => message.text.trim())) &&
+                          styles.exportOptionDisabled,
+                      ]}
+                      disabled={
+                        isLoadingMessages ||
+                        isExporting ||
+                        !messages.some((message) => message.text.trim())
+                      }
+                      onPress={() => setSelectedExportFormat("docx")}
+                      activeOpacity={0.75}
+                    >
+                      <View style={[styles.exportIconBox, styles.wordIconBox]}>
+                        <HugeiconsIcon
+                          icon={File01Icon}
+                          size={20}
+                          color={Colors.primary}
+                          strokeWidth={1.8}
+                        />
+                      </View>
+                      <View style={styles.exportOptionCopy}>
+                        <Text style={styles.exportOptionText}>
+                          Word (.docx)
+                        </Text>
+                        <Text style={styles.exportOptionHint}>
+                          Editable document
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  </>
+                )}
+                <TouchableOpacity
+                  style={styles.exportCancel}
+                  disabled={isExporting}
+                  onPress={() => setIsExportMenuVisible(false)}
+                  activeOpacity={0.75}
+                >
+                  <Text style={styles.exportCancelText}>Cancel</Text>
+                </TouchableOpacity>
+              </View>
+            </TouchableWithoutFeedback>
+          </View>
+        </TouchableWithoutFeedback>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -1007,6 +1543,14 @@ function ChatHistorySkeleton() {
 function isAgentActivityStage(value: unknown): value is AgentActivityStage {
   return (
     value === "understanding_request" ||
+    value === "opening_source" ||
+    value === "searching_web" ||
+    value === "reading_results" ||
+    value === "inspecting_details" ||
+    value === "comparing_options" ||
+    value === "typing_in_page" ||
+    value === "clicking_page" ||
+    value === "scrolling_page" ||
     value === "browsing_web" ||
     value === "using_connected_tools" ||
     value === "using_email" ||
@@ -1020,6 +1564,14 @@ function isAgentActivityStage(value: unknown): value is AgentActivityStage {
 const agentActivityLabels: Record<AgentActivityStage, string> = {
   thinking: "Thinking",
   understanding_request: "Understanding your request",
+  opening_source: "Opening source",
+  searching_web: "Searching the web",
+  reading_results: "Reading results",
+  inspecting_details: "Inspecting details",
+  comparing_options: "Comparing options",
+  typing_in_page: "Typing in page",
+  clicking_page: "Clicking",
+  scrolling_page: "Scrolling",
   browsing_web: "Browsing the web",
   using_connected_tools: "Working with connected tools",
   using_email: "Working with your email",
@@ -1070,7 +1622,7 @@ function AgentActivityIndicator({
         >
           <ActivityIndicator size="small" color={Colors.iconMuted} />
           <Text style={styles.activityText}>
-            {agentActivityLabels[activity.current]}
+            {activity.detail || agentActivityLabels[activity.current]}
           </Text>
         </Animated.View>
       </View>
@@ -1120,12 +1672,123 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: Colors.white,
   },
+  exportOverlay: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+    backgroundColor: "rgba(15, 23, 42, 0.4)",
+  },
+  exportDialog: {
+    width: "100%",
+    maxWidth: 360,
+    padding: 20,
+    borderRadius: 14,
+    backgroundColor: Colors.white,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  exportTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: Colors.textPrimary,
+  },
+  exportDescription: {
+    marginTop: 6,
+    marginBottom: 10,
+    fontSize: 13,
+    color: Colors.textSecondary,
+  },
+  exportBusyRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginBottom: 10,
+  },
+  exportBusyText: {
+    flex: 1,
+    color: Colors.textSecondary,
+    fontSize: 13,
+  },
+  exportOption: {
+    minHeight: 64,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    marginTop: 6,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    backgroundColor: Colors.surface,
+  },
+  exportIconBox: {
+    width: 40,
+    height: 40,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 10,
+  },
+  pdfIconBox: {
+    backgroundColor: Colors.errorLight,
+  },
+  wordIconBox: {
+    backgroundColor: Colors.primarySubtle,
+  },
+  shareIconBox: {
+    backgroundColor: Colors.infoLight,
+  },
+  downloadIconBox: {
+    backgroundColor: Colors.successLight,
+  },
+  exportOptionCopy: {
+    flex: 1,
+    paddingVertical: 9,
+  },
+  exportOptionDisabled: {
+    opacity: 0.5,
+  },
+  exportOptionText: {
+    color: Colors.textPrimary,
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  exportOptionHint: {
+    marginTop: 2,
+    color: Colors.textSecondary,
+    fontSize: 12,
+  },
+  exportBack: {
+    minHeight: 38,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 4,
+  },
+  exportCancel: {
+    minHeight: 42,
+    justifyContent: "center",
+    alignItems: "center",
+    marginTop: 8,
+  },
+  exportCancelText: {
+    color: Colors.textSecondary,
+    fontSize: 14,
+    fontWeight: "600",
+  },
   content: {
     flex: 1,
     justifyContent: "space-between",
   },
   scrollArea: {
     flex: 1,
+  },
+  olderMessagesLoadingIndicator: {
+    position: "absolute",
+    top: 10,
+    left: 0,
+    right: 0,
+    alignItems: "center",
+    zIndex: 1,
   },
   scrollContent: {
     paddingHorizontal: 16,
@@ -1279,6 +1942,7 @@ const styles = StyleSheet.create({
   },
   textInput: {
     flex: 1,
+    maxHeight: 112,
     fontSize: 14.5,
     color: Colors.iconDark,
     paddingHorizontal: 10,

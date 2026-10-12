@@ -64,7 +64,7 @@ export function logAgentEvent(
     .join(" | ");
 
   console.info(
-    `[Agent] ${event} | id=${formatField(executionId)}${fields ? ` | ${fields}` : ""}`,
+    `[Agent] ${event} | ts=${new Date().toISOString()} | id=${formatField(executionId)}${fields ? ` | ${fields}` : ""}`,
   );
 }
 
