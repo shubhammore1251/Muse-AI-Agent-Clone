@@ -9,7 +9,7 @@ export type ChatMessagesPage<T = unknown> = {
   hasMore: boolean;
 };
 
-export const DEFAULT_CHAT_MESSAGE_PAGE_SIZE = 1;
+export const DEFAULT_CHAT_MESSAGE_PAGE_SIZE = 2;
 const MAX_CHAT_MESSAGE_PAGE_SIZE = 20;
 
 export function normalizeChatMessagePageSize(pageSize: number): number {
